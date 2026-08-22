@@ -26,7 +26,7 @@ by its own PostgreSQL database (`fxrate_db`):
 | Real external FX rate provider | `RateRefreshScheduler` fakes a fluctuating rate instead — no API key/rate-limit/downtime handling to build against yet, and nothing downstream (Conversion Orchestrator) consumes real rates yet either. |
 | Expired-lock sweep | A lock past `expiresAt` is only marked `EXPIRED` lazily, the next time something tries to consume or release it — nothing proactively sweeps `ACTIVE` locks whose TTL has silently passed. Same gap as wallet-service's un-swept expired reservations. |
 | Kafka `rate.locked` / `rate.lock.failed` events | Nothing consumes these yet — same reasoning as wallet-service's deferred event publishing. |
-| Automated tests | Verified manually via `curl` for this step, same as wallet-service so far. |
+| Testcontainers integration tests | Same scope decision as wallet-service — unit tests only for this pass, see [Automated tests](#automated-tests) below. |
 | Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as wallet-service. |
 
 ## Package layout
@@ -40,6 +40,29 @@ com.paymentplatform.fxrate
 ├── web/           FxRateController + request/response DTO records
 └── exception/     custom exceptions + GlobalExceptionHandler
 ```
+
+## Automated tests
+
+Unit tests only for this pass (same scope decision as wallet-service): 35 tests total, all
+passing (`./mvnw test`).
+
+- **`FxRateCacheTest`** (3), **`DistributedLockManagerTest`** (5) — pure unit tests, no Spring,
+  no mocks; both classes are simple in-memory collections so they're cheap to exercise directly,
+  including the lease-expiry and wrong-lock-id-can't-steal-the-real-holder's-lock cases.
+- **`RateRefreshSchedulerTest`** (3) — real `FxRateCache`, mocked `FxRateRepository`, a real
+  pairs-config string. Checks the cache gets seeded, one row is persisted per configured pair,
+  the random walk stays within a generous bound of the previous value (not flaky, just proves
+  it's a small step not an arbitrary jump), and a malformed `fx.rate.pairs` entry fails fast at
+  construction.
+- **`FxRateServiceTest`** (15) — real `FxRateCache` and `DistributedLockManager` (both simple
+  enough to use as-is), mocked `FxRateLockRepository`. Covers the full lock state machine
+  including the two lazy-expiry branches that differ from each other: consuming an
+  expired-but-still-`ACTIVE` lock throws (and records the `EXPIRED` transition as a side
+  effect), while releasing the same kind of lock succeeds and marks it `EXPIRED` - see
+  `04-release-lock.md` for why that asymmetry is deliberate.
+- **`FxRateControllerTest`** (9) — `@WebMvcTest(FxRateController.class)`, `FxRateService` mocked
+  with `@MockitoBean`. Request validation and HTTP status/error-code mapping for all 4
+  endpoints.
 
 ## Local run
 

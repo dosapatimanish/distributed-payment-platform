@@ -24,7 +24,7 @@ PostgreSQL persistence:
 | Redis-backed `Idempotency-Key` handling | Same reason — the SAGA orchestrator is the thing that actually needs safe-retry semantics across services. Wallet-service alone doesn't need it yet. |
 | Transactional Outbox pattern | Only meaningful once there's a Kafka publish step to make reliable. |
 | Oracle | Postgres is free, Docker-friendly, and close enough in SQL/locking semantics (including `SELECT ... FOR UPDATE`) to develop against. The schema was kept Oracle-portable on purpose (see below) so the eventual migration is a config/dialect change, not a rewrite. |
-| Automated tests | Explicit user request for this step — verified manually with `curl` instead (see below). Will be added back in a follow-up step. |
+| ~~Automated tests~~ | **Done** — see [Automated tests](#automated-tests) below. Was explicit user request to defer for the initial build; verified manually with `curl` instead at the time. |
 | Flyway/Liquibase migrations | `spring.jpa.hibernate.ddl-auto=update` is fine while the schema is still moving during learning; must be replaced with real migrations once it stabilizes. |
 
 ## Package layout
@@ -97,6 +97,44 @@ attempt.
 another method in the *same* class (not via an injected reference to the bean), assume the
 annotation does nothing, and use `TransactionTemplate` (or restructure into a separate bean)
 instead. This is a general Spring pitfall, not specific to this project.
+
+## Automated tests
+
+Unit tests only for this pass (no Testcontainers/real-DB integration tests yet — that's a
+separate, larger follow-up): 35 tests total, all passing (`./mvnw test`).
+
+- **`WalletServiceTest`** (22 tests) — Mockito doubles for `WalletRepository`,
+  `WalletReservationRepository`, and `PlatformTransactionManager`; no Spring context. Covers
+  every business rule (insufficient funds, wallet-not-active vs FROZEN-allows-credit, duplicate
+  wallet on both the pre-check and the DB-unique-constraint-race paths, the full reservation
+  state machine) plus the two concurrency-control paths themselves: asserts
+  `findByIdForUpdate` is used for `highContention=true` wallets and never for ordinary ones, and
+  drives the optimistic-retry loop through a losing-then-winning sequence of
+  `ObjectOptimisticLockingFailureException`s to prove the retry/backoff/give-up behavior.
+- **`WalletControllerTest`** (11 tests) — `@WebMvcTest(WalletController.class)`, `WalletService`
+  mocked with `@MockitoBean`. Covers request validation and the HTTP status/error-code mapping
+  for every endpoint (`@WebMvcTest` auto-scans `@RestControllerAdvice`, so
+  `GlobalExceptionHandler` is exercised for free).
+
+**Mocking `PlatformTransactionManager`**: `WalletService` builds its own `TransactionTemplate`
+in the constructor (see the self-invocation section above) rather than using `@Transactional`,
+so there's no Spring proxy for a test to intercept. The trick that makes this testable without a
+real database: stub `transactionManager.getTransaction(...)` to return a bare mock
+`TransactionStatus`. `TransactionTemplate.execute()` only needs that one call to succeed before
+it runs the real callback synchronously - everything inside the callback (the repository calls)
+is still exercised for real, just without an actual transaction underneath it. The stub is
+`lenient()` because several tests (`createWallet`, `getBalance`, most error paths) never reach
+`applyMutation` at all, and Mockito's strict-stubs mode would otherwise fail those tests for an
+"unnecessary" stub that other tests in the same class do need.
+
+**A mocking mistake worth recording**: the first version of the optimistic-retry test reused one
+`Wallet` instance across all retry attempts (`when(walletRepository.findById(...)).thenReturn(...)`
+returning the same object every call). Since `debitMutation` mutates the entity in place, the
+balance kept compounding across attempts (100 → 90 → 80 → 70) even though two of those three
+"transactions" were supposed to have failed and rolled back. Real Postgres wouldn't do this — a
+failed commit rolls back, so the next `findById` re-reads the actually-committed balance,
+unchanged. Fix: `thenAnswer(...)` returning a **fresh** `Wallet` object on every call, so each
+retry attempt starts from the real committed state, the way a fresh `SELECT` would.
 
 ## Schema notes
 
@@ -176,8 +214,9 @@ All done manually via `curl` (automated tests deferred, see above):
 
 ## What's next
 
-- Bring automated tests back (MockMvc controller tests, a `WalletService` unit test with a real
-  concurrent-load harness per design doc section 7).
+- Testcontainers integration tests against real Postgres, to actually exercise
+  `SELECT ... FOR UPDATE` and the DB unique constraints end-to-end (deliberately out of scope
+  for this pass - see Automated tests above).
 - Kafka event publishing (`wallet.debited`, `wallet.credited`, `wallet.debit.failed`) once the
   Conversion Orchestrator exists to consume them.
 - Redis-backed `Idempotency-Key` handling on the write endpoints.
