@@ -1,14 +1,15 @@
 # Unit Testing Guide
 
-How wallet-service, fx-rate-service, conversion-orchestrator, and merchant-payment-service are
-unit-tested, written as a reusable reference for the next service (Ledger) rather than a report
-on what already exists. Every pattern below is copy-pasteable — it's what's actually in
-`WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`, `FxRateControllerTest`,
-`ConversionServiceTest`, `MerchantPaymentServiceTest`, etc.
+How wallet-service, fx-rate-service, conversion-orchestrator, merchant-payment-service, and
+ledger-service are unit-tested, written as a reusable reference for whichever service comes next
+rather than a report on what already exists. Every pattern below is copy-pasteable — it's what's
+actually in `WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`,
+`FxRateControllerTest`, `ConversionServiceTest`, `MerchantPaymentServiceTest`,
+`LedgerServiceTest`, etc.
 
 ## Scope decision: unit tests only, for now
 
-All four services currently have **unit tests only** — no Testcontainers/real-Postgres/
+All five services currently have **unit tests only** — no Testcontainers/real-Postgres/
 real-Redis/real-Kafka integration tests yet. Deliberate, not an oversight:
 
 | | Unit tests (done) | Testcontainers integration tests (deferred) |
@@ -382,17 +383,22 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | fx-rate-service | `IdempotencyGuardTest` | 8 | Identical structure to wallet-service's - the two `IdempotencyGuard` classes are deliberate copies |
 | fx-rate-service | `FxRateEventPublisherTest` | 3 | Identical structure to wallet-service's - the two publisher classes are deliberate copies |
 | conversion-orchestrator | `SagaStateMachineTest` | 39 | Every valid transition (parameterized, incl. the merchant-payment paths) + every rejected-transition case (skip a step, re-delivered terminal event, backwards move, terminal-state jump) |
-| conversion-orchestrator | `ConversionServiceTest` | 12 | One test per saga path: happy path, consume-lock-fails-but-completes, rate-lock-fails, debit-fails, credit-fails, reversal-itself-fails-stays-stuck, merchant payment approved/declined/call-fails, post-charge debit fails (refund then compensate) |
+| conversion-orchestrator | `ConversionServiceTest` | 14 | One test per saga path: happy path (incl. the 4-leg ledger posting), consume-lock-fails-but-completes, ledger-posting-fails-but-completes, rate-lock-fails, debit-fails (incl. no ledger reversal posted), credit-fails (incl. 2-leg ledger reversal), reversal-itself-fails-stays-stuck, merchant payment approved/declined (incl. 4-leg ledger reversal)/call-fails, post-charge debit fails (refund then compensate) |
 | conversion-orchestrator | `ConversionControllerTest` | 5 | Request validation + HTTP/error-code mapping, both endpoints |
 | conversion-orchestrator | `IdempotencyGuardTest` | 7 | Identical structure to the other two services' own - third deliberate copy |
 | merchant-payment-service | `MerchantPaymentServiceTest` | 9 | Both charge outcomes + event-publish calls, duplicate-transactionId conflict (no event on a failed save), full refund state machine |
 | merchant-payment-service | `MerchantPaymentControllerTest` | 8 | Request validation + HTTP/error-code mapping, all 3 endpoints - incl. a declined charge still returning 201 |
 | merchant-payment-service | `IdempotencyGuardTest` | 7 | Identical structure to the other services' own - fourth deliberate copy |
 | merchant-payment-service | `MerchantPaymentEventPublisherTest` | 3 | Identical structure to the other services' own event-publisher tests |
+| ledger-service | `DoubleEntryValidatorTest` | 6 | Pure unit tests, no mocks - balanced pair, empty posting, debit-only, mismatched amounts, multi-leg netting within one currency, the documented cross-currency limitation |
+| ledger-service | `LedgerServiceTest` | 4 | Repository mocked, real `DoubleEntryValidator` wired in - balanced posting, `LedgerConflictException` short-circuit, unbalanced posting never reaching `save`, `getStatement` delegation |
+| ledger-service | `LedgerControllerTest` | 7 | Request validation + HTTP/error-code mapping, both endpoints - incl. empty `entries`, `INVALID_LEDGER_ENTRIES`, `LEDGER_CONFLICT`, populated and empty statement |
+| ledger-service | `IdempotencyGuardTest` | 7 | Identical structure to the other services' own - fifth deliberate copy |
 
-**193 tests in this table** (195 total per `./mvnw test` across all four modules, including 2
-pre-existing Spring-Initializr smoke tests not written as part of this work). Run per service:
-`cd backend/<service> && ./mvnw test`.
+**219 tests in this table** (221 total per `./mvnw test` across all five modules, including 2
+pre-existing Spring-Initializr smoke tests not written as part of this work - wallet-service and
+fx-rate-service only, the other three modules were hand-scaffolded without one). Run per
+service: `cd backend/<service> && ./mvnw test`.
 
 ## Checklist for testing the next service
 

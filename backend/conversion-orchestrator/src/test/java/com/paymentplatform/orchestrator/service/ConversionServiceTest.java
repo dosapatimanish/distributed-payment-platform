@@ -1,8 +1,11 @@
 package com.paymentplatform.orchestrator.service;
 
 import com.paymentplatform.orchestrator.client.FxRateServiceClient;
+import com.paymentplatform.orchestrator.client.LedgerServiceClient;
 import com.paymentplatform.orchestrator.client.MerchantPaymentServiceClient;
 import com.paymentplatform.orchestrator.client.WalletServiceClient;
+import com.paymentplatform.orchestrator.client.dto.LedgerEntryType;
+import com.paymentplatform.orchestrator.client.dto.LedgerLineRequest;
 import com.paymentplatform.orchestrator.client.dto.PaymentResponse;
 import com.paymentplatform.orchestrator.client.dto.RateLockResponse;
 import com.paymentplatform.orchestrator.client.dto.WalletResponse;
@@ -20,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,12 +61,16 @@ class ConversionServiceTest {
     @Mock
     private MerchantPaymentServiceClient merchantPaymentClient;
 
+    @Mock
+    private LedgerServiceClient ledgerClient;
+
     private ConversionService conversionService;
 
     @BeforeEach
     void setUp() {
         conversionService = new ConversionService(
-                transactionRepository, stepLogRepository, walletClient, fxRateClient, merchantPaymentClient);
+                transactionRepository, stepLogRepository, walletClient, fxRateClient, merchantPaymentClient,
+                ledgerClient, "SYSTEM-FX-CLEARING");
         // save() just needs to hand back what it was given, like every other service's tests.
         // lenient: getConversion tests never call save() at all.
         lenient().when(transactionRepository.save(any(ConversionTransaction.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -101,6 +109,17 @@ class ConversionServiceTest {
         verify(fxRateClient).consumeLock(eq("lock-1"), anyString());
         verify(fxRateClient, never()).releaseLock(any());
         verify(merchantPaymentClient, never()).pay(any(), any(), any(), any(), any());
+
+        // Records the conversion via the clearing-account pattern - 4 legs, two per currency,
+        // each currency group nets to zero (see ConversionService.recordLedgerEntries's javadoc).
+        org.mockito.ArgumentCaptor<List<LedgerLineRequest>> entriesCaptor = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(ledgerClient).postEntries(eq(txn.getTransactionId()), entriesCaptor.capture(), anyString());
+        List<LedgerLineRequest> entries = entriesCaptor.getValue();
+        assertThat(entries).hasSize(4);
+        assertThat(entries.get(0)).isEqualTo(new LedgerLineRequest("src-wallet", LedgerEntryType.DEBIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
+        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
+        assertThat(entries.get(2)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.DEBIT, new BigDecimal("8300.0000"), "INR", BigDecimal.ZERO));
+        assertThat(entries.get(3)).isEqualTo(new LedgerLineRequest("dst-wallet", LedgerEntryType.CREDIT, new BigDecimal("8300.0000"), "INR", new BigDecimal("8300.00")));
     }
 
     @Test
@@ -112,6 +131,20 @@ class ConversionServiceTest {
         ConversionTransaction txn = conversionService.startConversion("idem-1", sampleRequest());
 
         assertThat(txn.getSagaState()).isEqualTo(SagaState.COMPLETED);
+    }
+
+    @Test
+    void startConversion_ledgerPostingFails_stillCompletes() {
+        stubHappyPathThroughCredit();
+        org.mockito.Mockito.doThrow(new RestClientException("ledger-service unreachable"))
+                .when(ledgerClient).postEntries(anyString(), any(), anyString());
+
+        ConversionTransaction txn = conversionService.startConversion("idem-1", sampleRequest());
+
+        // Same "already-moved money, best-effort" reasoning as consumeLock above - a ledger
+        // outage doesn't strand a saga that already succeeded at the wallet/FX layer.
+        assertThat(txn.getSagaState()).isEqualTo(SagaState.COMPLETED);
+        verify(fxRateClient).consumeLock(eq("lock-1"), anyString());
     }
 
     // ------------------------------------------------------------------
@@ -171,6 +204,29 @@ class ConversionServiceTest {
         verify(walletClient).credit(eq("src-wallet"), eq(new BigDecimal("100.00")), anyString(), anyString());
         verify(walletClient, never()).debit(eq("dst-wallet"), any(), anyString(), anyString());
         verify(fxRateClient).releaseLock("lock-1");
+
+        // Only the source-wallet side ever moved (and got reversed) - dest wallet was never
+        // touched, so the reversal posting is just the 2 source-currency legs, not 4.
+        org.mockito.ArgumentCaptor<List<LedgerLineRequest>> entriesCaptor = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(ledgerClient).postEntries(eq(txn.getTransactionId() + "-reversal"), entriesCaptor.capture(), anyString());
+        List<LedgerLineRequest> entries = entriesCaptor.getValue();
+        assertThat(entries).hasSize(2);
+        assertThat(entries.get(0)).isEqualTo(new LedgerLineRequest("src-wallet", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", new BigDecimal("100.00")));
+        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.DEBIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
+    }
+
+    @Test
+    void startConversion_debitFails_postsNoLedgerReversal_nothingEverMoved() {
+        when(fxRateClient.lockRate(any(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RateLockResponse("lock-1", new BigDecimal("83.0000"), "ACTIVE"));
+        when(walletClient.debit(any(), any(), anyString(), anyString()))
+                .thenThrow(new RestClientException("Insufficient funds"));
+
+        conversionService.startConversion("idem-1", sampleRequest());
+
+        // DEBIT_FAILED compensates with reverseCredit=false, reverseDebit=false - nothing was
+        // ever debited, so there's nothing to record either.
+        verify(ledgerClient, never()).postEntries(any(), any(), any());
     }
 
     @Test
@@ -259,6 +315,11 @@ class ConversionServiceTest {
         verify(walletClient).debit(eq("dst-wallet"), eq(new BigDecimal("8300.0000")), anyString(), anyString());
         verify(walletClient).credit(eq("src-wallet"), eq(new BigDecimal("100.00")), anyString(), anyString());
         verify(fxRateClient).releaseLock("lock-1");
+
+        // Both sides reversed - the reversal posting is the full 4-leg mirror.
+        org.mockito.ArgumentCaptor<List<LedgerLineRequest>> entriesCaptor = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(ledgerClient).postEntries(eq(txn.getTransactionId() + "-reversal"), entriesCaptor.capture(), anyString());
+        assertThat(entriesCaptor.getValue()).hasSize(4);
     }
 
     @Test

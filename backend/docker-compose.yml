@@ -70,6 +70,24 @@ services:
       timeout: 5s
       retries: 5
 
+  ledger-postgres:
+    image: postgres:16-alpine
+    container_name: ledger-postgres
+    environment:
+      POSTGRES_DB: ledger_db
+      POSTGRES_USER: ledger_app
+      POSTGRES_PASSWORD: ledger_app_pw
+    ports:
+      # Host port 5438 - 5432/5433/5434/5435/5436/5437 already taken locally.
+      - "5438:5432"
+    volumes:
+      - ledger_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger_app -d ledger_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Shared platform infra (design doc's system diagram groups Redis with the shared
   # infrastructure, not owned per-service like Postgres) - both wallet-service and
   # fx-rate-service connect to this one instance for Idempotency-Key storage, each under its
@@ -114,4 +132,5 @@ volumes:
   fxrate_postgres_data:
   orchestrator_postgres_data:
   payment_postgres_data:
+  ledger_postgres_data:
   redis_data:
