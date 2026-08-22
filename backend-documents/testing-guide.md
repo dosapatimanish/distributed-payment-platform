@@ -150,6 +150,60 @@ class FxRateServiceTest {
 Mocking something that has no meaningful behavior to fake just adds noise — prefer a real
 instance whenever the "real" cost is a few lines of pure Java.
 
+## Pattern 4 — testing a Redis-backed component without real Redis
+
+See `idempotency.md` for what `IdempotencyGuard` is and why it exists - this section is just the
+testing technique.
+
+`IdempotencyGuard` (wallet-service and fx-rate-service both have one - deliberate copies of each
+other, see each service's implementation-notes doc) depends on Spring Data Redis's
+`StringRedisTemplate`. Mock it the same way as any other collaborator - the one wrinkle is that
+`RedisTemplate`/`StringRedisTemplate` doesn't expose `get`/`set`/`setIfAbsent` directly; those
+live on a nested `ValueOperations` object returned by `opsForValue()`, so that has to be mocked
+and wired in too:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class IdempotencyGuardTest {
+
+    @Mock
+    private StringRedisTemplate redisTemplate;
+
+    @Mock
+    private ValueOperations<String, String> valueOperations;
+
+    private IdempotencyGuard guard;
+
+    @BeforeEach
+    void setUp() {
+        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        guard = new IdempotencyGuard(redisTemplate, new ObjectMapper(), 24L, "wallet:idem:");
+    }
+
+    @Test
+    void checkAndReserve_freshKey_reservesAndReturnsEmpty() {
+        when(valueOperations.setIfAbsent(eq("wallet:idem:key-1"), eq("IN_PROGRESS"), any(Duration.class)))
+                .thenReturn(true);
+
+        assertThat(guard.checkAndReserve("key-1", SampleResponse.class)).isEmpty();
+    }
+}
+```
+
+The `opsForValue()` stub goes in `@BeforeEach` as `lenient()` (Trap 1 above) because not every
+test calls it - `release()`, for instance, only calls `redisTemplate.delete(...)` directly.
+
+A real `ObjectMapper` (Jackson 3's `tools.jackson.databind.ObjectMapper` - see the Boot 4.1
+gotchas in each service's implementation-notes doc) is used for the (de)serialization the guard
+does internally; mocking JSON serialization would just mean re-implementing a fake JSON
+formatter by hand for no benefit.
+
+This is real Redis behavior faked at the `StringRedisTemplate` boundary - it does not prove the
+actual `SETNX` race resolves correctly under real concurrent load against a real Redis server.
+That's exactly the kind of gap Testcontainers integration tests would close (see "Current gaps"
+below) - this unit test proves `IdempotencyGuard`'s own logic is correct *given* whatever
+`StringRedisTemplate` returns, not that Redis will return what we assume.
+
 ## Two mocking traps worth knowing before you hit them
 
 ### Trap 1 — `UnnecessaryStubbingException` from a shared `@BeforeEach` stub
@@ -237,14 +291,18 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | Service | Test class | Count | What it covers |
 |---|---|---|---|
 | wallet-service | `WalletServiceTest` | 22 | Business rules, both concurrency-control paths, reservation state machine |
-| wallet-service | `WalletControllerTest` | 11 | Request validation + HTTP/error-code mapping, all 7 endpoints |
+| wallet-service | `WalletControllerTest` | 14 | Request validation + HTTP/error-code mapping, all 7 endpoints, incl. missing-header/key-in-progress |
+| wallet-service | `IdempotencyGuardTest` | 9 | checkAndReserve/confirm/release + runIdempotent's fresh/replay/failure-releases outcomes |
 | fx-rate-service | `FxRateCacheTest` | 3 | Snapshot get/refresh/replace |
 | fx-rate-service | `DistributedLockManagerTest` | 5 | Acquire/release/lease-expiry/wrong-id-can't-steal-lock |
 | fx-rate-service | `RateRefreshSchedulerTest` | 3 | Cache seeding, persisted-row count, bounded random walk, malformed config fails fast |
 | fx-rate-service | `FxRateServiceTest` | 15 | Full rate-lock state machine, including the consume-vs-release expiry asymmetry |
-| fx-rate-service | `FxRateControllerTest` | 9 | Request validation + HTTP/error-code mapping, all 4 endpoints |
+| fx-rate-service | `FxRateControllerTest` | 12 | Request validation + HTTP/error-code mapping, all 4 endpoints, incl. missing-header/key-in-progress |
+| fx-rate-service | `IdempotencyGuardTest` | 8 | Identical structure to wallet-service's - the two `IdempotencyGuard` classes are deliberate copies |
 
-**68 tests total, all passing.** Run per service: `cd backend/<service> && ./mvnw test`.
+**91 tests in this table** (93 total per `./mvnw test` across both modules, including 2
+pre-existing Spring-Initializr smoke tests not written as part of this work). Run per service:
+`cd backend/<service> && ./mvnw test`.
 
 ## Checklist for testing the next service
 
@@ -260,6 +318,9 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 5. If the service uses `TransactionTemplate` instead of `@Transactional` (check for
    self-invocation first), mock `PlatformTransactionManager.getTransaction(...)` to return a
    bare `TransactionStatus` mock.
-6. Testcontainers/real-Postgres integration tests are still a deliberate gap across both
-   existing services — worth deciding once, for whichever service takes it on first, rather than
+6. If the service uses `IdempotencyGuard` (or writes a new Redis-backed component), mock
+   `StringRedisTemplate` + its `ValueOperations` (Pattern 4) — don't forget `opsForValue()`
+   itself needs stubbing before `get`/`set`/`setIfAbsent` on it will do anything.
+7. Testcontainers/real-Postgres/real-Redis integration tests are still a deliberate gap across
+   both existing services — worth deciding once, for whichever service takes it on first, rather than
    re-deciding per service.

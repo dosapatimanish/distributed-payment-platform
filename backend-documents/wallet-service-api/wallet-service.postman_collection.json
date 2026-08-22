@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Wallet Service",
-    "description": "Wallet lifecycle + reservation APIs for the distributed payment platform (wallet-service, port 8081).",
+    "description": "Wallet lifecycle + reservation APIs for the distributed payment platform (wallet-service, port 8081). Every write request carries an Idempotency-Key header (design doc §6.2.3); re-sending a request unchanged replays its original response instead of re-running the mutation.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -28,7 +28,10 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-create-wallet-1" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"userId\": \"user-123\",\n  \"currency\": \"USD\",\n  \"highContention\": false\n}"
@@ -51,7 +54,10 @@
       "name": "Credit Wallet",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-credit-1" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-002\"\n}"
@@ -67,7 +73,10 @@
       "name": "Debit Wallet",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-debit-1" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"amount\": 50.00,\n  \"transactionId\": \"txn-001\"\n}"
@@ -97,7 +106,10 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-reserve-1" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"amount\": 25.00,\n  \"transactionId\": \"txn-003\"\n}"
@@ -113,6 +125,9 @@
       "name": "Capture Reservation",
       "request": {
         "method": "POST",
+        "header": [
+          { "key": "Idempotency-Key", "value": "postman-capture-1" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/v1/wallets/reservations/{{reservationId}}/capture",
           "host": ["{{baseUrl}}"],
@@ -124,6 +139,9 @@
       "name": "Release Reservation",
       "request": {
         "method": "POST",
+        "header": [
+          { "key": "Idempotency-Key", "value": "postman-release-1" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/v1/wallets/reservations/{{reservationId}}/release",
           "host": ["{{baseUrl}}"],

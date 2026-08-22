@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "FX Rate Service",
-    "description": "Rate quoting + rate-lock APIs for the distributed payment platform (fx-rate-service, port 8082).",
+    "description": "Rate quoting + rate-lock APIs for the distributed payment platform (fx-rate-service, port 8082). lockRate and consumeLock require an Idempotency-Key header (design doc §6.2.3); re-sending unchanged replays the original response.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -38,7 +38,10 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-lock-1" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"baseCurrency\": \"USD\",\n  \"quoteCurrency\": \"INR\",\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-fx-001\"\n}"
@@ -50,6 +53,9 @@
       "name": "Consume Lock",
       "request": {
         "method": "POST",
+        "header": [
+          { "key": "Idempotency-Key", "value": "postman-consume-1" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/v1/fx/rate-lock/{{lockId}}/consume",
           "host": ["{{baseUrl}}"],

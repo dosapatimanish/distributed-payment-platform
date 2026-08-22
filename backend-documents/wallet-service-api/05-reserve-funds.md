@@ -10,6 +10,8 @@ Creates a row in a separate `wallet_reservation` table; **does not touch `wallet
 
 ## Request
 
+Header: `Idempotency-Key` (required) — see [01-create-wallet.md](01-create-wallet.md)'s Features.
+
 ```json
 {
   "amount": 25.00,
@@ -42,25 +44,28 @@ Creates a row in a separate `wallet_reservation` table; **does not touch `wallet
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | `amount` missing/≤0, or blank `transactionId` |
+| 400 | `VALIDATION_FAILED` | missing `Idempotency-Key` header, `amount` missing/≤0, or blank `transactionId` |
 | 404 | `WALLET_NOT_FOUND` | no wallet with that id |
 | 409 | `WALLET_NOT_ACTIVE` | wallet not `ACTIVE` |
+| 409 | `IDEMPOTENCY_KEY_IN_PROGRESS` | another request with this same key is still processing |
 | 422 | `INSUFFICIENT_FUNDS` | `amount` > current balance |
 
 ## Flow (file by file)
 
-1. [WalletController.reserve](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/web/WalletController.java) — binds `ReserveRequest`.
-2. [WalletService.reserveFunds](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/service/WalletService.java):
+1. [WalletController.reserve](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/web/WalletController.java) — `@RequestHeader("Idempotency-Key")` (required) + binds `ReserveRequest`.
+2. [IdempotencyGuard.runIdempotent](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/idempotency/IdempotencyGuard.java) — a completed key short-circuits to the cached `ReservationResponse`, skipping every step below.
+3. [WalletService.reserveFunds](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/service/WalletService.java):
    - probes the wallet with a plain `findById` to check `highContention`.
    - **`highContention=true`**: opens a transaction, re-reads the wallet via `findByIdForUpdate` (row lock held for the duration), then `createReservation` — serializes the balance check + insert so two concurrent holds on a hot wallet can't both pass a check against balance that only covers one of them.
    - **normal wallet**: `createReservation` runs straight off the unlocked probe read — a plain read-then-insert. Documented gap: two concurrent reserves on the same low-contention wallet can both pass the balance check, because balance itself is never decremented at hold time. Accepted simplification for now; closing it needs a separate "held total" tracked per wallet.
    - `createReservation` — `requireActive`, `requireSufficientFunds` (checked against `wallet.balance`, not balance-minus-other-holds), builds a `WalletReservation` with status `HELD` and `expiresAt`, saves it.
-3. [WalletReservationRepository](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/repository/WalletReservationRepository.java) — plain `JpaRepository`, just `save`.
-4. [WalletReservation entity](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/domain/WalletReservation.java) — `walletId` kept as a plain string column, not a JPA `@ManyToOne`, on purpose (see its javadoc) — the service always loads the target `Wallet` explicitly under its chosen lock strategy, not implicitly through a relation.
-5. `ReservationResponse.from(reservation)`.
+4. [WalletReservationRepository](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/repository/WalletReservationRepository.java) — plain `JpaRepository`, just `save`.
+5. [WalletReservation entity](../../backend/wallet-service/src/main/java/com/paymentplatform/wallet/domain/WalletReservation.java) — `walletId` kept as a plain string column, not a JPA `@ManyToOne`, on purpose (see its javadoc) — the service always loads the target `Wallet` explicitly under its chosen lock strategy, not implicitly through a relation.
+6. `ReservationResponse.from(reservation)`. On success, `IdempotencyGuard` caches it; on failure, the key is released.
 
 ## Features
 
 - **Two-phase money movement**: reserve (hold, no balance change) → capture (real debit, see doc 06) or release (drop the hold, see doc 07). Useful when authorization and settlement are separate steps (e.g. checkout auth vs. later capture).
 - **TTL-bound holds**: every reservation carries `expiresAt`; nothing currently sweeps expired `HELD` reservations automatically — that's a follow-up piece, not implemented in this endpoint.
 - **Contention-aware locking**, same dispatch rule as debit/credit, applied here to the balance-check-then-insert sequence instead of a balance mutation.
+- **`Idempotency-Key` here matters more than on debit/credit**: without it, a retried reserve call would create a *second*, independent hold for the same intent (reservations have no natural dedup key the way `(userId, currency)` gives wallet creation) — see [01-create-wallet.md](01-create-wallet.md)'s Features.

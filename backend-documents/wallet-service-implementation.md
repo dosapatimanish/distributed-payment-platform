@@ -21,7 +21,7 @@ PostgreSQL persistence:
 | Deferred | Why |
 |---|---|
 | Kafka event publishing (`wallet.debited`, etc.) | Nothing consumes these yet — the Conversion Orchestrator that will react to them doesn't exist yet. Building it now would be untestable plumbing. |
-| Redis-backed `Idempotency-Key` handling | Same reason — the SAGA orchestrator is the thing that actually needs safe-retry semantics across services. Wallet-service alone doesn't need it yet. |
+| ~~Redis-backed `Idempotency-Key` handling~~ | **Done** — see [Idempotency-Key](#idempotency-key) below. |
 | Transactional Outbox pattern | Only meaningful once there's a Kafka publish step to make reliable. |
 | Oracle | Postgres is free, Docker-friendly, and close enough in SQL/locking semantics (including `SELECT ... FOR UPDATE`) to develop against. The schema was kept Oracle-portable on purpose (see below) so the eventual migration is a config/dialect change, not a rewrite. |
 | ~~Automated tests~~ | **Done** — see [Automated tests](#automated-tests) below. Was explicit user request to defer for the initial build; verified manually with `curl` instead at the time. |
@@ -36,7 +36,8 @@ com.paymentplatform.wallet
 ├── repository/    WalletRepository, WalletReservationRepository
 ├── service/       WalletService  (all business logic + concurrency control)
 ├── web/           WalletController + request/response DTO records
-└── exception/     custom exceptions + GlobalExceptionHandler
+├── exception/     custom exceptions + GlobalExceptionHandler
+└── idempotency/   IdempotencyGuard, IdempotencyKeyInProgressException
 ```
 
 One package per layer, matching the design doc's class list. No mapper/facade layer — DTOs
@@ -98,10 +99,45 @@ another method in the *same* class (not via an injected reference to the bean), 
 annotation does nothing, and use `TransactionTemplate` (or restructure into a separate bean)
 instead. This is a general Spring pitfall, not specific to this project.
 
+## Idempotency-Key
+
+See [idempotency.md](idempotency.md) for the full concept writeup (what/why/how, shared across
+both services) — this section covers only wallet-service-specific detail.
+
+Every write endpoint now requires an `Idempotency-Key` header (design doc §6.2.3) - `POST
+/wallets`, `debit`, `credit`, `reserve`, `capture`, `release`. `getBalance` is read-only, no key
+needed. Missing header → 400 `VALIDATION_FAILED`.
+
+**Mechanics** (`IdempotencyGuard`, backed by Redis): an atomic `SETNX idem:{key}` reserves the
+key as `IN_PROGRESS` (24h TTL). The winner runs the real mutation and, on success, overwrites
+the key with the serialized response - any later call with the same key gets that cached
+response back (same status/body as the original) instead of re-running the mutation. A call
+that arrives while the first is still mid-flight gets `IdempotencyKeyInProgressException` → 409
+`IDEMPOTENCY_KEY_IN_PROGRESS` (poll, don't resubmit).
+
+**Deliberate simplification vs. the design doc's literal wording**: only a *successful*
+completion is cached. If the mutation throws, `IdempotencyGuard.runIdempotent` releases the key
+(deletes it) instead of caching the failure - so a genuinely retried request after a transient
+error (a lost connection, an optimistic-lock conflict) gets a fresh attempt instead of being
+permanently stuck replaying an old error. Verified manually: a debit for more than the balance
+correctly returns 422 and releases its key; retrying the *same* key with a valid amount right
+after succeeds, rather than replaying the 422 forever.
+
+**Where it lives**: `IdempotencyGuard` exposes the design doc's named primitives
+(`checkAndReserve`, `confirm`) plus a `runIdempotent(key, responseType, action)` convenience
+wrapper that composes them - every controller method calls the wrapper, one line each. See
+`WalletController`'s class javadoc and `testing-guide.md`'s "Mocking a Redis-backed guard"
+pattern for how it's tested without a real Redis.
+
+**Shared Redis instance**: one `redis` container (`backend/docker-compose.yml`) serves both
+wallet-service and fx-rate-service - matches the design doc's system diagram, which groups
+Redis with shared platform infra rather than owning it per-service like Postgres. Each service
+prefixes its keys (`wallet:idem:` / `fxrate:idem:`) so they can't collide.
+
 ## Automated tests
 
-Unit tests only for this pass (no Testcontainers/real-DB integration tests yet — that's a
-separate, larger follow-up): 35 tests total, all passing (`./mvnw test`).
+Unit tests only for this pass (no Testcontainers/real-DB/real-Redis integration tests yet —
+that's a separate, larger follow-up): 47 tests total, all passing (`./mvnw test`).
 
 - **`WalletServiceTest`** (22 tests) — Mockito doubles for `WalletRepository`,
   `WalletReservationRepository`, and `PlatformTransactionManager`; no Spring context. Covers
@@ -111,10 +147,17 @@ separate, larger follow-up): 35 tests total, all passing (`./mvnw test`).
   `findByIdForUpdate` is used for `highContention=true` wallets and never for ordinary ones, and
   drives the optimistic-retry loop through a losing-then-winning sequence of
   `ObjectOptimisticLockingFailureException`s to prove the retry/backoff/give-up behavior.
-- **`WalletControllerTest`** (11 tests) — `@WebMvcTest(WalletController.class)`, `WalletService`
-  mocked with `@MockitoBean`. Covers request validation and the HTTP status/error-code mapping
-  for every endpoint (`@WebMvcTest` auto-scans `@RestControllerAdvice`, so
-  `GlobalExceptionHandler` is exercised for free).
+- **`WalletControllerTest`** (14 tests) — `@WebMvcTest(WalletController.class)`, `WalletService`
+  and `IdempotencyGuard` both mocked with `@MockitoBean`. The guard is stubbed as a passthrough
+  by default (runs the action straight through) so most tests can focus on
+  `WalletController`/`WalletService` behavior; a few tests override it to prove the
+  missing-header (400) and key-in-progress (409) paths specifically. Covers request validation
+  and the HTTP status/error-code mapping for every endpoint (`@WebMvcTest` auto-scans
+  `@RestControllerAdvice`, so `GlobalExceptionHandler` is exercised for free).
+- **`IdempotencyGuardTest`** (9 tests) — `StringRedisTemplate` and its `ValueOperations` mocked
+  with Mockito, a real `ObjectMapper`. Covers `checkAndReserve`/`confirm`/`release` individually
+  plus `runIdempotent`'s three outcomes (fresh key runs and caches, completed key replays
+  without re-running, failed key releases and rethrows).
 
 **Mocking `PlatformTransactionManager`**: `WalletService` builds its own `TransactionTemplate`
 in the constructor (see the self-invocation section above) rather than using `@Transactional`,
@@ -171,16 +214,29 @@ recorded here rather than left to be rediscovered:
 - Pattern matching in `switch` over exception types is available on the Java 25 runtime, but
   `GlobalExceptionHandler` retains a plain `if (ex instanceof ...)` chain for clear, stable
   exception mapping behavior.
+- **Jackson 3, not Jackson 2 - different base package.** `spring-boot-starter-webmvc` pulls in
+  Jackson 3.x, where `ObjectMapper` lives at `tools.jackson.databind.ObjectMapper` (not
+  `com.fasterxml.jackson.databind`) and its checked-exception hierarchy is gone -
+  `JacksonException` now extends `RuntimeException`, so `readValue`/`writeValueAsString` calls
+  in `IdempotencyGuard` need no try/catch at all. Same "unzip the actual jar and grep it"
+  approach as the `@WebMvcTest` package move above confirmed this - `jackson-annotations` is
+  still `com.fasterxml.jackson.annotation` (that part didn't move), which makes guessing at the
+  right import from memory actively misleading here.
 
 ## How to run it locally
 
 ```bash
 cd backend
-docker compose up -d          # starts wallet-postgres (postgres:16-alpine), waits for healthy
+docker compose up -d wallet-postgres redis   # this service's Postgres + the shared Redis
 
 cd wallet-service
 ./mvnw spring-boot:run        # starts the service on :8081
 ```
+
+If the port is already in use on startup, it's most likely a previous `spring-boot:run` still
+running in the background from an earlier session — find and stop that specific PID (`netstat
+-ano | grep :8081` on Windows) rather than a blanket "kill all java processes", which can take
+down an unrelated JVM (an IDE's language server, another service) along with it.
 
 Sanity checks:
 ```bash
@@ -211,15 +267,19 @@ All done manually via `curl` (automated tests deferred, see above):
    10 rejected, final balance exactly `0.0000`.
 4. This is also where the self-invocation `@Transactional` bug above was actually caught — the
    first attempt at step 3 returned HTTP 500 on every request to the high-contention wallet.
+5. **Idempotency-Key, against real Redis**: missing header → 400; create-wallet replayed with
+   the same key → identical `walletId`/timestamps back, no second wallet created; debit replayed
+   with the same key → identical post-debit balance back, no second debit; a debit that fails
+   with 422 (insufficient funds) releases its key, so retrying that *same* key with a valid
+   amount right after succeeds instead of replaying the old 422 forever.
 
 ## What's next
 
-- Testcontainers integration tests against real Postgres, to actually exercise
-  `SELECT ... FOR UPDATE` and the DB unique constraints end-to-end (deliberately out of scope
-  for this pass - see Automated tests above).
+- Testcontainers integration tests against real Postgres and real Redis, to actually exercise
+  `SELECT ... FOR UPDATE`, the DB unique constraints, and the idempotency guard's `SETNX` race
+  end-to-end (deliberately out of scope for this pass - see Automated tests above).
 - Kafka event publishing (`wallet.debited`, `wallet.credited`, `wallet.debit.failed`) once the
   Conversion Orchestrator exists to consume them.
-- Redis-backed `Idempotency-Key` handling on the write endpoints.
 - Transactional Outbox pattern, once there's a Kafka publish step to make reliable.
 - Flyway migrations, replacing `ddl-auto=update`, once the schema stabilizes.
 - Eventual Oracle migration (schema was kept portable for exactly this).
