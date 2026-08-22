@@ -7,19 +7,22 @@ already exists. Every pattern below is copy-pasteable — it's what's actually i
 
 ## Scope decision: unit tests only, for now
 
-Both services currently have **unit tests only** — no Testcontainers/real-Postgres integration
-tests yet. Deliberate, not an oversight:
+Both services currently have **unit tests only** — no Testcontainers/real-Postgres/real-Redis/
+real-Kafka integration tests yet. Deliberate, not an oversight:
 
 | | Unit tests (done) | Testcontainers integration tests (deferred) |
 |---|---|---|
-| Speed | ~2-6s per module | Much slower — spins up real Postgres per run |
+| Speed | ~2-6s per module | Much slower — spins up real Postgres/Redis/Kafka per run |
 | Needs Docker at test time | No | Yes |
-| Proves | Business logic, validation, error mapping | The DB actually enforces `SELECT ... FOR UPDATE`, unique constraints, `@Version` conflicts under real concurrent load |
+| Proves | Business logic, validation, error mapping | The DB actually enforces `SELECT ... FOR UPDATE`, unique constraints, `@Version` conflicts under real concurrent load; Redis's `SETNX` race resolves correctly; Kafka actually persists/orders published events |
 
-The unit tests below **simulate** the concurrency behavior (e.g. feeding a mocked repository a
-scripted sequence of `ObjectOptimisticLockingFailureException`s) rather than proving Postgres
-itself does what the code assumes. That gap is real and worth closing with an integration-test
-pass later — see each service's implementation-notes doc for the "what's next" entry.
+The unit tests below **simulate** this behavior (e.g. feeding a mocked repository a scripted
+sequence of `ObjectOptimisticLockingFailureException`s, or a mocked `KafkaTemplate` a
+pre-built `CompletableFuture`) rather than proving Postgres/Redis/Kafka themselves do what the
+code assumes. That gap is real and worth closing with an integration-test pass later — see each
+service's implementation-notes doc for the "what's next" entry. The Kafka half of this gap was
+partly closed *manually* (not by the automated suite) — see kafka-events.md's "Manually
+verified" section.
 
 ## What's already on the classpath — no pom.xml changes needed
 
@@ -204,6 +207,60 @@ That's exactly the kind of gap Testcontainers integration tests would close (see
 below) - this unit test proves `IdempotencyGuard`'s own logic is correct *given* whatever
 `StringRedisTemplate` returns, not that Redis will return what we assume.
 
+## Pattern 5 — testing a Kafka-publishing component without a real broker
+
+See `kafka-events.md` for what `WalletEventPublisher`/`FxRateEventPublisher` are and why they
+exist - this section is just the testing technique. Simpler than Pattern 4's Redis case: mock
+`KafkaTemplate<String, String>` directly, no nested-operations-object wrinkle. The one thing to
+get right is `KafkaTemplate.send(...)`'s return type - a `CompletableFuture`, which the
+publisher chains `.whenComplete(...)` onto, so the mock has to return an actual (completed, or
+failed) future, not `null`:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class WalletEventPublisherTest {
+
+    @Mock
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    private WalletEventPublisher publisher;
+
+    @BeforeEach
+    void setUp() {
+        publisher = new WalletEventPublisher(kafkaTemplate, new ObjectMapper());
+    }
+
+    @Test
+    void publishDebited_sendsSerializedEventKeyedByWalletId() {
+        when(kafkaTemplate.send(eq("wallet.debited"), eq("w-1"), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        publisher.publishDebited(new WalletDebitedEvent("w-1", "txn-1", TEN, TEN, Instant.now()));
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(kafkaTemplate).send(eq("wallet.debited"), eq("w-1"), payload.capture());
+        assertThat(payload.getValue()).contains("\"walletId\":\"w-1\"");
+    }
+
+    @Test
+    void publish_kafkaSendFailsAsynchronously_doesNotPropagateToCaller() {
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("kafka unreachable")));
+
+        assertThatCode(() -> publisher.publishDebited(/* ... */)).doesNotThrowAnyException();
+    }
+}
+```
+
+That second test matters more than it looks: it's the one thing proving a Kafka outage can
+never turn into an unexpected exception bubbling up through a controller that already committed
+its DB work. Skipping it would leave that guarantee undocumented and unverified.
+
+Same caveat as Pattern 4: this proves the publisher's own logic, not that a real broker
+actually receives, persists, or orders these messages correctly. That was verified once
+manually against a real broker instead (see kafka-events.md) - still a Testcontainers-shaped
+gap in the automated suite, same category as the Postgres/Redis ones.
+
 ## Two mocking traps worth knowing before you hit them
 
 ### Trap 1 — `UnnecessaryStubbingException` from a shared `@BeforeEach` stub
@@ -290,17 +347,19 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 
 | Service | Test class | Count | What it covers |
 |---|---|---|---|
-| wallet-service | `WalletServiceTest` | 22 | Business rules, both concurrency-control paths, reservation state machine |
+| wallet-service | `WalletServiceTest` | 25 | Business rules, both concurrency-control paths, reservation state machine, event-publish calls |
 | wallet-service | `WalletControllerTest` | 14 | Request validation + HTTP/error-code mapping, all 7 endpoints, incl. missing-header/key-in-progress |
 | wallet-service | `IdempotencyGuardTest` | 9 | checkAndReserve/confirm/release + runIdempotent's fresh/replay/failure-releases outcomes |
+| wallet-service | `WalletEventPublisherTest` | 4 | Topic/key/payload per event type, failed-send doesn't propagate |
 | fx-rate-service | `FxRateCacheTest` | 3 | Snapshot get/refresh/replace |
 | fx-rate-service | `DistributedLockManagerTest` | 5 | Acquire/release/lease-expiry/wrong-id-can't-steal-lock |
 | fx-rate-service | `RateRefreshSchedulerTest` | 3 | Cache seeding, persisted-row count, bounded random walk, malformed config fails fast |
-| fx-rate-service | `FxRateServiceTest` | 15 | Full rate-lock state machine, including the consume-vs-release expiry asymmetry |
+| fx-rate-service | `FxRateServiceTest` | 17 | Full rate-lock state machine, including the consume-vs-release expiry asymmetry, event-publish calls |
 | fx-rate-service | `FxRateControllerTest` | 12 | Request validation + HTTP/error-code mapping, all 4 endpoints, incl. missing-header/key-in-progress |
 | fx-rate-service | `IdempotencyGuardTest` | 8 | Identical structure to wallet-service's - the two `IdempotencyGuard` classes are deliberate copies |
+| fx-rate-service | `FxRateEventPublisherTest` | 3 | Identical structure to wallet-service's - the two publisher classes are deliberate copies |
 
-**91 tests in this table** (93 total per `./mvnw test` across both modules, including 2
+**103 tests in this table** (105 total per `./mvnw test` across both modules, including 2
 pre-existing Spring-Initializr smoke tests not written as part of this work). Run per service:
 `cd backend/<service> && ./mvnw test`.
 
@@ -321,6 +380,10 @@ pre-existing Spring-Initializr smoke tests not written as part of this work). Ru
 6. If the service uses `IdempotencyGuard` (or writes a new Redis-backed component), mock
    `StringRedisTemplate` + its `ValueOperations` (Pattern 4) — don't forget `opsForValue()`
    itself needs stubbing before `get`/`set`/`setIfAbsent` on it will do anything.
-7. Testcontainers/real-Postgres/real-Redis integration tests are still a deliberate gap across
-   both existing services — worth deciding once, for whichever service takes it on first, rather than
-   re-deciding per service.
+7. If the service publishes Kafka events, mock `KafkaTemplate<String, String>` (Pattern 5) —
+   remember `send(...)` returns a `CompletableFuture` your publisher likely chains
+   `.whenComplete(...)` onto, so the stub needs to return an actual future, and write the
+   failed-future test proving a broker outage never propagates out of the publisher.
+8. Testcontainers/real-Postgres/real-Redis/real-Kafka integration tests are still a deliberate
+   gap across both existing services — worth deciding once, for whichever service takes it on
+   first, rather than re-deciding per service.

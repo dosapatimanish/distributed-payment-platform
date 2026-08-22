@@ -22,10 +22,10 @@ by its own PostgreSQL database (`fxrate_db`):
 
 | Deferred | Why |
 |---|---|
-| Real Redisson `RLock` for rate-lock creation | Single-instance service has no cross-JVM lock contention yet. `DistributedLockManager` is an in-memory placeholder with the exact same two-method contract (`acquireLock`/`releaseLock`), so swapping in real Redisson later is a class-body change, not a call-site change. Same category of deferral as wallet-service's Kafka piece. Note: this is a *different* Redis than the one now backing Idempotency-Key below - that one really is real Redis, just not yet used for distributed locking here. |
+| Real Redisson `RLock` for rate-lock creation | Single-instance service has no cross-JVM lock contention yet. `DistributedLockManager` is an in-memory placeholder with the exact same two-method contract (`acquireLock`/`releaseLock`), so swapping in real Redisson later is a class-body change, not a call-site change. Note: this is a *different* Redis than the one backing Idempotency-Key/Kafka below - that one really is real infra, just not yet used for distributed locking here. |
 | Real external FX rate provider | `RateRefreshScheduler` fakes a fluctuating rate instead — no API key/rate-limit/downtime handling to build against yet, and nothing downstream (Conversion Orchestrator) consumes real rates yet either. |
 | Expired-lock sweep | A lock past `expiresAt` is only marked `EXPIRED` lazily, the next time something tries to consume or release it — nothing proactively sweeps `ACTIVE` locks whose TTL has silently passed. Same gap as wallet-service's un-swept expired reservations. |
-| Kafka `rate.locked` / `rate.lock.failed` events | Nothing consumes these yet — same reasoning as wallet-service's deferred event publishing. |
+| ~~Kafka `rate.locked` / `rate.lock.failed` events~~ | **Done** — see [Kafka Events](#kafka-events) below. |
 | Testcontainers integration tests | Same scope decision as wallet-service — unit tests only for this pass, see [Automated tests](#automated-tests) below. |
 | Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as wallet-service. |
 
@@ -39,7 +39,8 @@ com.paymentplatform.fxrate
 ├── service/       FxRateCache, DistributedLockManager, RateRefreshScheduler, FxRateService
 ├── web/           FxRateController + request/response DTO records
 ├── exception/     custom exceptions + GlobalExceptionHandler
-└── idempotency/   IdempotencyGuard, IdempotencyKeyInProgressException
+├── idempotency/   IdempotencyGuard, IdempotencyKeyInProgressException
+└── event/         FxRateEventPublisher + event records (RateLockedEvent, RateLockFailedEvent)
 ```
 
 ## Idempotency-Key
@@ -67,9 +68,23 @@ Same shared Redis instance as wallet-service (`backend/docker-compose.yml`'s `re
 namespaced under `fxrate:idem:` so the two services' keys can't collide with wallet-service's
 `wallet:idem:`.
 
+## Kafka Events
+
+See [kafka-events.md](kafka-events.md) for the full concept writeup (what/why/how, shared
+across both services) - this section covers only fx-rate-service-specific detail.
+
+`FxRateService.lockRate` publishes `rate.locked` on success or `rate.lock.failed` on any
+failure (unsupported pair, or the mutex/unique-constraint conflict), both keyed by
+`transactionId`. The original method body was renamed to a private `doLockRate`; the public
+`lockRate` wraps it in a try/publish-then-rethrow, same shape as wallet-service's `debit`.
+`consumeLock` and `releaseLock` publish nothing - neither is in the design doc's topic table.
+
+Same shared Kafka broker as wallet-service (`backend/docker-compose.yml`'s `kafka` service),
+same direct-publish-no-outbox simplification and its accepted gap (see kafka-events.md).
+
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as wallet-service): 46 tests total, all
+Unit tests only for this pass (same scope decision as wallet-service): 51 tests total, all
 passing (`./mvnw test`).
 
 - **`FxRateCacheTest`** (3), **`DistributedLockManagerTest`** (5) — pure unit tests, no Spring,
@@ -80,12 +95,13 @@ passing (`./mvnw test`).
   the random walk stays within a generous bound of the previous value (not flaky, just proves
   it's a small step not an arbitrary jump), and a malformed `fx.rate.pairs` entry fails fast at
   construction.
-- **`FxRateServiceTest`** (15) — real `FxRateCache` and `DistributedLockManager` (both simple
-  enough to use as-is), mocked `FxRateLockRepository`. Covers the full lock state machine
-  including the two lazy-expiry branches that differ from each other: consuming an
-  expired-but-still-`ACTIVE` lock throws (and records the `EXPIRED` transition as a side
-  effect), while releasing the same kind of lock succeeds and marks it `EXPIRED` - see
-  `04-release-lock.md` for why that asymmetry is deliberate.
+- **`FxRateServiceTest`** (17) — real `FxRateCache` and `DistributedLockManager` (both simple
+  enough to use as-is), mocked `FxRateLockRepository` and `FxRateEventPublisher`. Covers the
+  full lock state machine including the two lazy-expiry branches that differ from each other:
+  consuming an expired-but-still-`ACTIVE` lock throws (and records the `EXPIRED` transition as a
+  side effect), while releasing the same kind of lock succeeds and marks it `EXPIRED` - see
+  `04-release-lock.md` for why that asymmetry is deliberate. Also asserts the right
+  `FxRateEventPublisher` method is called on success vs. failure.
 - **`FxRateControllerTest`** (12) — `@WebMvcTest(FxRateController.class)`, `FxRateService` and
   `IdempotencyGuard` both mocked with `@MockitoBean` (the guard stubbed as a passthrough by
   default, same pattern as wallet-service's `WalletControllerTest`). Request validation and HTTP
@@ -94,11 +110,14 @@ passing (`./mvnw test`).
 - **`IdempotencyGuardTest`** (8) — identical structure to wallet-service's own
   `IdempotencyGuardTest` (mocked `StringRedisTemplate`/`ValueOperations`, real `ObjectMapper`),
   since the two `IdempotencyGuard` classes are deliberate copies of each other.
+- **`FxRateEventPublisherTest`** (3) — identical structure to wallet-service's own
+  `WalletEventPublisherTest` (mocked `KafkaTemplate`, real `ObjectMapper`), since the two
+  publisher classes are deliberate copies of each other.
 
 ## Local run
 
 ```
-docker compose -f backend/docker-compose.yml up -d fxrate-postgres redis
+docker compose -f backend/docker-compose.yml up -d fxrate-postgres redis kafka
 cd backend/fx-rate-service && ./mvnw spring-boot:run
 ```
 
@@ -123,10 +142,15 @@ on finding and stopping the specific orphaned PID rather than killing all java p
   replayed with the same key → identical `lockId`/`lockedRate` back, not the `RATE_LOCK_CONFLICT`
   a plain retry would otherwise hit; `consumeLock` replayed with the same key → identical
   `CONSUMED` response back, not the `RATE_LOCK_NOT_ACTIVE` a plain retry would otherwise hit.
+- **Kafka events, against a real broker**: `lockRate` success → `rate.locked`, keyed by
+  `transactionId`, `lockedRate` in the payload matches the HTTP response; `lockRate` on an
+  unsupported pair → `rate.lock.failed`. See kafka-events.md for the full verification
+  (both services' events read back from the same broker in one pass).
 
 ## Next candidates
 
 - Conversion Orchestrator (port `:8083`) — the first service that actually calls both
-  wallet-service and fx-rate-service, per design doc §6.3.3.
-- Or round out fx-rate-service/wallet-service gaps (Kafka events, Testcontainers integration
-  tests) before taking on the orchestrator's added complexity.
+  wallet-service and fx-rate-service, per design doc §6.3.3. It now has real events to consume
+  from both services.
+- Or round out fx-rate-service/wallet-service gaps (Transactional Outbox, Testcontainers
+  integration tests) before taking on the orchestrator's added complexity.

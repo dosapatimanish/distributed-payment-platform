@@ -2,6 +2,7 @@ package com.paymentplatform.fxrate.service;
 
 import com.paymentplatform.fxrate.domain.FxRateLock;
 import com.paymentplatform.fxrate.domain.RateLockStatus;
+import com.paymentplatform.fxrate.event.FxRateEventPublisher;
 import com.paymentplatform.fxrate.exception.RateLockConflictException;
 import com.paymentplatform.fxrate.exception.RateLockNotActiveException;
 import com.paymentplatform.fxrate.exception.RateLockNotFoundException;
@@ -22,6 +23,8 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -37,13 +40,16 @@ class FxRateServiceTest {
     @Mock
     private FxRateLockRepository lockRepository;
 
+    @Mock
+    private FxRateEventPublisher eventPublisher;
+
     private FxRateCache cache;
     private FxRateService fxRateService;
 
     @BeforeEach
     void setUp() {
         cache = new FxRateCache();
-        fxRateService = new FxRateService(cache, new DistributedLockManager(), lockRepository, LOCK_TTL_SECONDS);
+        fxRateService = new FxRateService(cache, new DistributedLockManager(), lockRepository, eventPublisher, LOCK_TTL_SECONDS);
     }
 
     private void seedRate(String base, String quote, String rate) {
@@ -107,6 +113,26 @@ class FxRateServiceTest {
 
         assertThatThrownBy(() -> fxRateService.lockRate("txn-1", "USD", "INR", BigDecimal.TEN))
                 .isInstanceOf(RateLockConflictException.class);
+    }
+
+    @Test
+    void lockRate_success_publishesRateLockedEvent() {
+        seedRate("USD", "INR", "83.0000");
+        when(lockRepository.save(any(FxRateLock.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        fxRateService.lockRate("txn-1", "USD", "INR", new BigDecimal("100.00"));
+
+        verify(eventPublisher).publishRateLocked(any());
+        verify(eventPublisher, never()).publishRateLockFailed(any());
+    }
+
+    @Test
+    void lockRate_uncachedPair_publishesRateLockFailedEvent() {
+        assertThatThrownBy(() -> fxRateService.lockRate("txn-1", "XXX", "YYY", BigDecimal.TEN))
+                .isInstanceOf(UnsupportedCurrencyPairException.class);
+
+        verify(eventPublisher).publishRateLockFailed(any());
+        verify(eventPublisher, never()).publishRateLocked(any());
     }
 
     // ------------------------------------------------------------------
