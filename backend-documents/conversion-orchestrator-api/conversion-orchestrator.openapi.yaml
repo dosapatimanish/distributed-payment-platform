@@ -1,0 +1,149 @@
+openapi: 3.0.3
+info:
+  title: Conversion Orchestrator API
+  description: >
+    Wallet-to-wallet currency conversion SAGA endpoints for the distributed payment platform.
+    Reduced scope vs. the design doc - see backend-documents/conversion-orchestrator-implementation.md
+    for exactly what changed and why (no Merchant Payment/Ledger integration yet, synchronous
+    REST orchestration instead of async Kafka choreography).
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8083
+    description: Local (docker-compose Postgres, orchestrator-postgres on host port 5436)
+
+tags:
+  - name: Conversions
+    description: Start and poll a wallet-to-wallet conversion saga
+
+paths:
+  /api/v1/conversions:
+    post:
+      tags: [Conversions]
+      operationId: startConversion
+      summary: Start a wallet-to-wallet conversion saga
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversionRequest' }
+            example:
+              userId: "e2e-user"
+              sourceWalletId: "d7063dc8-ac68-489e-bc57-9129acbf80e2"
+              destWalletId: "21a05d48-914d-4b1c-af6b-fbc63b74d01f"
+              sourceCurrency: "USD"
+              destCurrency: "INR"
+              sourceAmount: 100.00
+      responses:
+        "201":
+          description: >
+            Saga run to completion (successfully or not) - check `sagaState` in the body for
+            the actual outcome (`COMPLETED`, `FAILED`, or `COMPENSATED`). Always 201 because the
+            conversion *transaction record* was created and processed either way; this mirrors
+            an async job-accepted response, with `sagaState` as the real status field. A retried
+            call with the same Idempotency-Key replays this exact body unchanged.
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/conversions/{transactionId}" }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversionResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "409": { $ref: '#/components/responses/IdempotencyInProgress' }
+
+  /api/v1/conversions/{transactionId}:
+    get:
+      tags: [Conversions]
+      operationId: getConversion
+      summary: Poll a conversion saga's current status
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+      responses:
+        "200":
+          description: Current saga state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversionResponse' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key identifying one attempt at starting this saga (design doc §6.2.3).
+        A retried call with the same key replays the saga's already-computed final result
+        instead of running it again. Missing header → 400.
+      schema: { type: string }
+
+  schemas:
+    ConversionRequest:
+      type: object
+      required: [userId, sourceWalletId, destWalletId, sourceCurrency, destCurrency, sourceAmount]
+      properties:
+        userId: { type: string }
+        sourceWalletId: { type: string, format: uuid }
+        destWalletId: { type: string, format: uuid }
+        sourceCurrency: { type: string, minLength: 3, maxLength: 3 }
+        destCurrency: { type: string, minLength: 3, maxLength: 3 }
+        sourceAmount: { type: number, format: decimal, minimum: 0.0001 }
+
+    ConversionResponse:
+      type: object
+      properties:
+        transactionId: { type: string, format: uuid }
+        userId: { type: string }
+        sourceWalletId: { type: string, format: uuid }
+        destWalletId: { type: string, format: uuid }
+        sourceCurrency: { type: string }
+        destCurrency: { type: string }
+        sourceAmount: { type: number, format: decimal }
+        destAmount: { type: number, format: decimal, description: "Null if the rate lock step never succeeded" }
+        lockedRate: { type: number, format: decimal, description: "Null if the rate lock step never succeeded" }
+        sagaState:
+          type: string
+          enum: [STARTED, RATE_LOCKED, SOURCE_DEBITED, DEST_CREDITED, COMPLETED, FAILED, DEBIT_FAILED, CREDIT_FAILED, COMPENSATING, SOURCE_CREDITED_BACK, LOCK_RELEASED, COMPENSATED]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        error: { type: string }
+        code:
+          type: string
+          enum:
+            - CONVERSION_NOT_FOUND
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_IN_PROGRESS
+            - INVALID_SAGA_TRANSITION
+            - DOWNSTREAM_SERVICE_ERROR
+            - INTERNAL_ERROR
+        message: { type: string }
+        path: { type: string }
+
+  responses:
+    ValidationError:
+      description: Missing Idempotency-Key header, or request body failed bean validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: No conversion with that transactionId
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    IdempotencyInProgress:
+      description: Another request with this same Idempotency-Key is still being processed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

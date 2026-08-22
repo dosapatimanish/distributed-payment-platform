@@ -1,8 +1,9 @@
 # Idempotency-Key — Concept, Rationale, and Implementation
 
-Cross-cutting concept doc, not tied to one service — wallet-service and fx-rate-service both
-implement this the same way (deliberate independent copies of the same `IdempotencyGuard`
-class, not a shared library — see each service's implementation-notes doc).
+Cross-cutting concept doc, not tied to one service — wallet-service, fx-rate-service, and
+conversion-orchestrator all implement this the same way (deliberate independent copies of the
+same `IdempotencyGuard` class, not a shared library — see each service's implementation-notes
+doc).
 
 ## What is idempotency
 
@@ -177,23 +178,30 @@ from replaying a retried request. Don't conflate the two when reading fx-rate-se
 | fx-rate `lockRate`, `consumeLock` | Yes | Mutate state; retry-after-success would otherwise hit a business-layer error, not a replay (see above). |
 | fx-rate `getCurrentRate` | No | Read-only, naturally idempotent. |
 | fx-rate `releaseLock` | No | Already idempotent at the business layer by explicit design (design doc §6.4) — a key would add nothing. |
+| orchestrator `startConversion` (`POST /conversions`) | Yes | Starts and runs the entire saga to a terminal state; a retry must replay the whole saga's already-computed result (design doc §5.3 flow diagram, step 2), not re-run it. |
+| orchestrator `getConversion` (`GET /conversions/{id}`) | No | Read-only, naturally idempotent. |
 
 ## Testing without a real Redis
 
 Unit-tested by mocking `StringRedisTemplate` and its nested `ValueOperations` (Mockito) — see
 `testing-guide.md`'s "Pattern 4 — testing a Redis-backed component without real Redis" for the
-full pattern and code. `IdempotencyGuardTest` exists in both services (9 tests in wallet-service,
-8 in fx-rate-service, identical structure since the classes are deliberate copies).
+full pattern and code. `IdempotencyGuardTest` exists in all three services (9 tests in
+wallet-service, 8 in fx-rate-service, 7 in conversion-orchestrator, identical structure since
+the classes are deliberate copies).
 
 This proves `IdempotencyGuard`'s own logic is correct given whatever `StringRedisTemplate`
 returns — it does **not** prove the real `SETNX` race resolves correctly against a real Redis
 server under genuine concurrent load. That's a Testcontainers integration-test gap, tracked as a
-deliberate "what's next" item in both services' implementation notes, not yet closed.
+deliberate "what's next" item in each service's implementation notes, not yet closed. The
+saga-level replay (a retried `POST /conversions` returning the already-computed result without
+re-running the saga) *was* verified manually against a real Redis instance — see
+conversion-orchestrator-implementation.md's "Verification performed".
 
 ## Related docs
 
-- `wallet-service-implementation.md` / `fx-rate-service-implementation.md` — the "Idempotency-Key"
-  section in each, with the manual `curl`-against-real-Redis verification performed.
+- `wallet-service-implementation.md` / `fx-rate-service-implementation.md` /
+  `conversion-orchestrator-implementation.md` — the "Idempotency-Key" section in each, with the
+  manual `curl`-against-real-Redis verification performed.
 - `wallet-service-api/01-create-wallet.md` (and siblings 03-07) / `fx-rate-service-api/02-lock-rate.md`
   (and 03-consume-lock.md) — per-endpoint request/error-table detail.
 - `testing-guide.md` — Pattern 4, the mocking approach used in `IdempotencyGuardTest`.
