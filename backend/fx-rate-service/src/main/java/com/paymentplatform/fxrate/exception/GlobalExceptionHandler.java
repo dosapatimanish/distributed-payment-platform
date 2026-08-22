@@ -1,0 +1,75 @@
+package com.paymentplatform.fxrate.exception;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.time.Instant;
+
+/**
+ * Translates every exception this service throws into one consistent {@link ErrorResponse}
+ * JSON body - same role as wallet-service's GlobalExceptionHandler.
+ */
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(UnsupportedCurrencyPairException.class)
+    public ResponseEntity<ErrorResponse> handleUnsupportedPair(UnsupportedCurrencyPairException ex, HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, "UNSUPPORTED_CURRENCY_PAIR", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler(RateLockNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleLockNotFound(RateLockNotFoundException ex, HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, "RATE_LOCK_NOT_FOUND", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler({
+            RateLockNotActiveException.class,
+            RateLockConflictException.class,
+            DataIntegrityViolationException.class
+    })
+    public ResponseEntity<ErrorResponse> handleConflict(Exception ex, HttpServletRequest req) {
+        String code;
+        String message = ex.getMessage();
+        if (ex instanceof RateLockNotActiveException) {
+            code = "RATE_LOCK_NOT_ACTIVE";
+        } else if (ex instanceof RateLockConflictException) {
+            code = "RATE_LOCK_CONFLICT";
+        } else if (ex instanceof DataIntegrityViolationException) {
+            code = "RATE_LOCK_CONFLICT";
+            message = "A lock already exists for this transaction";
+        } else {
+            code = "DATA_CONFLICT";
+        }
+        return build(HttpStatus.CONFLICT, code, message, req);
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest req) {
+        String message = ex.getBindingResult().getFieldErrors().stream()
+                .map(fe -> fe.getField() + " " + fe.getDefaultMessage())
+                .reduce((a, b) -> a + "; " + b)
+                .orElse("Validation failed");
+        return build(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", message, req);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex, HttpServletRequest req) {
+        log.error("Unhandled exception on {} {}", req.getMethod(), req.getRequestURI(), ex);
+        return build(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An unexpected error occurred", req);
+    }
+
+    private ResponseEntity<ErrorResponse> build(HttpStatus status, String code, String message, HttpServletRequest req) {
+        ErrorResponse body = new ErrorResponse(
+                Instant.now(), status.value(), status.getReasonPhrase(), code, message, req.getRequestURI());
+        return ResponseEntity.status(status).body(body);
+    }
+}

@@ -16,5 +16,24 @@ services:
       timeout: 5s
       retries: 5
 
+  fxrate-postgres:
+    image: postgres:16-alpine
+    container_name: fxrate-postgres
+    environment:
+      POSTGRES_DB: fxrate_db
+      POSTGRES_USER: fxrate_app
+      POSTGRES_PASSWORD: fxrate_app_pw
+    ports:
+      # Host port 5435, not 5432 - runs alongside wallet-postgres without clashing.
+      - "5435:5432"
+    volumes:
+      - fxrate_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxrate_app -d fxrate_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   wallet_postgres_data:
+  fxrate_postgres_data:

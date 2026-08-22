@@ -1,0 +1,72 @@
+{
+  "info": {
+    "name": "FX Rate Service",
+    "description": "Rate quoting + rate-lock APIs for the distributed payment platform (fx-rate-service, port 8082).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8082" },
+    { "key": "lockId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Get Current Rate",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/fx/rates/USD/INR",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "fx", "rates", "USD", "INR"]
+        }
+      }
+    },
+    {
+      "name": "Lock Rate",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('lockId', body.lockId);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"baseCurrency\": \"USD\",\n  \"quoteCurrency\": \"INR\",\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-fx-001\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/fx/rate-lock", "host": ["{{baseUrl}}"], "path": ["api", "v1", "fx", "rate-lock"] }
+      }
+    },
+    {
+      "name": "Consume Lock",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/fx/rate-lock/{{lockId}}/consume",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "fx", "rate-lock", "{{lockId}}", "consume"]
+        }
+      }
+    },
+    {
+      "name": "Release Lock",
+      "request": {
+        "method": "DELETE",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/fx/rate-lock/{{lockId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "fx", "rate-lock", "{{lockId}}"]
+        }
+      }
+    }
+  ]
+}
