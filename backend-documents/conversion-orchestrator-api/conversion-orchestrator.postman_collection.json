@@ -1,0 +1,55 @@
+{
+  "info": {
+    "name": "Conversion Orchestrator",
+    "description": "Wallet-to-wallet conversion SAGA endpoints (conversion-orchestrator, port 8083). Requires wallet-service (8081) and fx-rate-service (8082) running with real wallets already created/funded - see wallet-service.postman_collection.json.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8083" },
+    { "key": "sourceWalletId", "value": "" },
+    { "key": "destWalletId", "value": "" },
+    { "key": "transactionId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Start Conversion",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('transactionId', body.transactionId);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-conversion-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 100.00\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/conversions", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversions"] }
+      }
+    },
+    {
+      "name": "Get Conversion Status",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/conversions/{{transactionId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "conversions", "{{transactionId}}"]
+        }
+      }
+    }
+  ]
+}

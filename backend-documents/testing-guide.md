@@ -1,14 +1,15 @@
 # Unit Testing Guide
 
-How wallet-service and fx-rate-service are unit-tested, written as a reusable reference for the
-next service (Conversion Orchestrator, Merchant Payment, Ledger) rather than a report on what
+How wallet-service, fx-rate-service, and conversion-orchestrator are unit-tested, written as a
+reusable reference for the next service (Merchant Payment, Ledger) rather than a report on what
 already exists. Every pattern below is copy-pasteable — it's what's actually in
-`WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`, `FxRateControllerTest`, etc.
+`WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`, `FxRateControllerTest`,
+`ConversionServiceTest`, etc.
 
 ## Scope decision: unit tests only, for now
 
-Both services currently have **unit tests only** — no Testcontainers/real-Postgres/real-Redis/
-real-Kafka integration tests yet. Deliberate, not an oversight:
+All three services currently have **unit tests only** — no Testcontainers/real-Postgres/
+real-Redis/real-Kafka integration tests yet. Deliberate, not an oversight:
 
 | | Unit tests (done) | Testcontainers integration tests (deferred) |
 |---|---|---|
@@ -23,6 +24,17 @@ code assumes. That gap is real and worth closing with an integration-test pass l
 service's implementation-notes doc for the "what's next" entry. The Kafka half of this gap was
 partly closed *manually* (not by the automated suite) — see kafka-events.md's "Manually
 verified" section.
+
+**A concrete case where this gap actually bit**: conversion-orchestrator's
+`ConversionServiceTest` mocks its repository's `save()` to return exactly what was passed in -
+faithful to what a mock *should* do, but not to what Hibernate's real `merge()` path actually
+does for an entity with a manually-assigned id and no `@Version` field (it returns a *different*
+object with DB-computed fields populated, not the same instance mutated in place). The mocked
+test suite passed the whole time; only a real-Postgres manual `curl` test caught that
+`createdAt`/`updatedAt` came back `null` on the live response. See
+conversion-orchestrator-implementation.md's "A real bug this caught: `Persistable` and
+manually-assigned entity IDs" for the full story and fix - worth reading before adding another
+entity with an application-assigned id anywhere in this codebase.
 
 ## What's already on the classpath — no pom.xml changes needed
 
@@ -358,8 +370,12 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | fx-rate-service | `FxRateControllerTest` | 12 | Request validation + HTTP/error-code mapping, all 4 endpoints, incl. missing-header/key-in-progress |
 | fx-rate-service | `IdempotencyGuardTest` | 8 | Identical structure to wallet-service's - the two `IdempotencyGuard` classes are deliberate copies |
 | fx-rate-service | `FxRateEventPublisherTest` | 3 | Identical structure to wallet-service's - the two publisher classes are deliberate copies |
+| conversion-orchestrator | `SagaStateMachineTest` | 30 | Every valid transition (parameterized) + every rejected-transition case (skip a step, re-delivered terminal event, backwards move, terminal-state jump) |
+| conversion-orchestrator | `ConversionServiceTest` | 8 | One test per saga path: happy path, consume-lock-fails-but-completes, rate-lock-fails, debit-fails, credit-fails, reversal-itself-fails-stays-stuck |
+| conversion-orchestrator | `ConversionControllerTest` | 5 | Request validation + HTTP/error-code mapping, both endpoints |
+| conversion-orchestrator | `IdempotencyGuardTest` | 7 | Identical structure to the other two services' own - third deliberate copy |
 
-**103 tests in this table** (105 total per `./mvnw test` across both modules, including 2
+**153 tests in this table** (155 total per `./mvnw test` across all three modules, including 2
 pre-existing Spring-Initializr smoke tests not written as part of this work). Run per service:
 `cd backend/<service> && ./mvnw test`.
 
@@ -384,6 +400,12 @@ pre-existing Spring-Initializr smoke tests not written as part of this work). Ru
    remember `send(...)` returns a `CompletableFuture` your publisher likely chains
    `.whenComplete(...)` onto, so the stub needs to return an actual future, and write the
    failed-future test proving a broker outage never propagates out of the publisher.
-8. Testcontainers/real-Postgres/real-Redis/real-Kafka integration tests are still a deliberate
-   gap across both existing services — worth deciding once, for whichever service takes it on
-   first, rather than re-deciding per service.
+8. If a new entity uses an application-assigned id (not `@GeneratedValue`) and has no
+   `@Version` field, implement `Persistable<ID>` on it (see conversion-orchestrator's
+   `ConversionTransaction`) - otherwise Spring Data JPA's default new-vs-existing check can
+   route even the first `save()` through `merge()` instead of `persist()`, silently dropping any
+   `@PrePersist`-set fields from the object you already hold. No unit test with a mocked
+   repository will ever catch this - only a real database will.
+9. Testcontainers/real-Postgres/real-Redis/real-Kafka integration tests are still a deliberate
+   gap across all three existing services — worth deciding once, for whichever service takes it
+   on first, rather than re-deciding per service.

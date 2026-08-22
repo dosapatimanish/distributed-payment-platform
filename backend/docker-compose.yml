@@ -34,6 +34,24 @@ services:
       timeout: 5s
       retries: 5
 
+  orchestrator-postgres:
+    image: postgres:16-alpine
+    container_name: orchestrator-postgres
+    environment:
+      POSTGRES_DB: saga_db
+      POSTGRES_USER: orchestrator_app
+      POSTGRES_PASSWORD: orchestrator_app_pw
+    ports:
+      # Host port 5436 - 5432/5433/5434/5435 already taken locally.
+      - "5436:5432"
+    volumes:
+      - orchestrator_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator_app -d saga_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Shared platform infra (design doc's system diagram groups Redis with the shared
   # infrastructure, not owned per-service like Postgres) - both wallet-service and
   # fx-rate-service connect to this one instance for Idempotency-Key storage, each under its
@@ -76,4 +94,5 @@ services:
 volumes:
   wallet_postgres_data:
   fxrate_postgres_data:
+  orchestrator_postgres_data:
   redis_data:
