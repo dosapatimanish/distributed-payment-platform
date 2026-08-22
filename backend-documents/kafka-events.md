@@ -1,17 +1,21 @@
 # Kafka Event Publishing — Concept, Rationale, and Implementation
 
-Cross-cutting concept doc, not tied to one service — wallet-service and fx-rate-service both
-implement this the same way (deliberate independent copies of the same publisher pattern, not a
-shared library — see each service's implementation-notes doc, same approach as `idempotency.md`).
+Cross-cutting concept doc, not tied to one service — wallet-service, fx-rate-service, and
+merchant-payment-service all implement this the same way (deliberate independent copies of the
+same publisher pattern, not a shared library — see each service's implementation-notes doc,
+same approach as `idempotency.md`).
 
 ## What this is
 
-Both services now publish domain events to Kafka whenever a money-relevant thing happens:
-wallet-service on every debit/credit, fx-rate-service on every rate-lock attempt. This is
-**producer-only** for this pass — no consumer exists yet, because the thing that would consume
-these (the Conversion Orchestrator) hasn't been built. Publishing now, ahead of having a
+All three services publish domain events to Kafka whenever a money-relevant thing happens:
+wallet-service on every debit/credit, fx-rate-service on every rate-lock attempt,
+merchant-payment-service on every charge attempt. This is **producer-only** for this pass — no
+consumer exists yet, because the thing that would consume these (the Conversion Orchestrator,
+which exists now but runs synchronously via REST, not via Kafka consumption - see its own
+implementation notes) doesn't consume Kafka events yet. Publishing now, ahead of having a
 consumer, is deliberate: it proves the producer side works in isolation and gives the
-orchestrator something real to build against later, rather than building both sides blind.
+orchestrator's eventual async-choreography follow-up something real to build against, rather
+than building both sides blind.
 
 ## Why this matters here specifically
 
@@ -37,11 +41,15 @@ the caller that made the request, not any other interested service.
 | `wallet.credited` | wallet-service | `walletId` | `WalletService.credit` — success only, no failure topic exists for credit |
 | `rate.locked` | fx-rate-service | `transactionId` | `FxRateService.lockRate` — success |
 | `rate.lock.failed` | fx-rate-service | `transactionId` | `FxRateService.lockRate` — any failure (unsupported pair, conflict) |
+| `payment.completed` | merchant-payment-service | `transactionId` | `MerchantPaymentService.pay` — acquirer approved |
+| `payment.failed` | merchant-payment-service | `transactionId` | `MerchantPaymentService.pay` — acquirer declined |
 
-Two topics from the design doc's full table are **not** built yet — `payment.completed` /
-`payment.failed` (Merchant Payment Service, doesn't exist) and `saga.completed` /
-`saga.compensated` (Conversion Orchestrator, doesn't exist). Those are the next services' jobs
-to publish, not these two.
+One topic pair from the design doc's full table is **not** built yet — `saga.completed` /
+`saga.compensated` (published by the Conversion Orchestrator, which exists now but doesn't
+publish Kafka events in its current synchronous-REST design - see its implementation notes'
+What's next). No refund event exists either - not in the design doc's topic table, same
+"success-only, no dedicated failure/secondary topic" pattern as wallet-service's `credit` and
+fx-rate-service's `releaseLock`.
 
 **Why the partition key matters**: Kafka guarantees ordering only *within* a partition, and a
 topic's messages are spread across partitions by key. Keying `wallet.*` events by `walletId`
@@ -118,7 +126,7 @@ imports `com.fasterxml.jackson.databind.ObjectMapper` — **Jackson 2** — as o
 4.1.1. This project runs **Jackson 3** (`tools.jackson.databind.ObjectMapper`, pulled in by
 `spring-boot-starter-webmvc` — see the Boot 4.1 gotchas in each service's implementation-notes
 doc). Rather than pull in a second, older Jackson major version just to satisfy spring-kafka's
-serializer, both services configure plain `StringSerializer` for the Kafka value type and do the
+serializer, all three services configure plain `StringSerializer` for the Kafka value type and do the
 JSON conversion themselves inside the publisher, using the app's own Jackson-3 `ObjectMapper`
 bean — the exact same pattern `IdempotencyGuard` already uses for Redis. One technique, reused
 for a second infrastructure integration.
@@ -151,13 +159,16 @@ worth doing before a consumer exists to care.
 
 Unit-tested by mocking `KafkaTemplate<String, String>` (Mockito) — same idea as mocking any
 other collaborator (`testing-guide.md` Pattern 1), with a real `ObjectMapper` for the
-serialization (Pattern 3). `WalletEventPublisherTest` / `FxRateEventPublisherTest` verify each
-publish method sends to the right topic, keyed correctly, with a payload containing the expected
-fields — plus one test per class proving a failed/exceptional `CompletableFuture` from
-`kafkaTemplate.send(...)` never propagates out of the publisher.
+serialization (Pattern 3). `WalletEventPublisherTest` / `FxRateEventPublisherTest` /
+`MerchantPaymentEventPublisherTest` verify each publish method sends to the right topic, keyed
+correctly, with a payload containing the expected fields — plus one test per class proving a
+failed/exceptional `CompletableFuture` from `kafkaTemplate.send(...)` never propagates out of
+the publisher.
 
-`WalletServiceTest` / `FxRateServiceTest` separately verify the *calling* side: a successful
-debit/lockRate calls the success-publish method and never the failure one, and vice versa.
+`WalletServiceTest` / `FxRateServiceTest` / `MerchantPaymentServiceTest` separately verify the
+*calling* side: a successful debit/lockRate/pay calls the success-publish method and never the
+failure one, and vice versa — `MerchantPaymentServiceTest` additionally asserts a *conflicted*
+save (duplicate `transactionId`) publishes neither, since no payment was actually persisted.
 
 This proves the publishing logic is correct given whatever `KafkaTemplate` does — it does not
 prove events actually arrive at a real broker, survive a restart, or preserve partition ordering
@@ -168,7 +179,7 @@ Postgres/Redis ones already tracked in `testing-guide.md`.
 ## Manually verified (against a real broker)
 
 `docker compose up -d kafka` (single-node KRaft mode, `apache/kafka:3.9.0` — no Zookeeper
-needed), both services started against it, then:
+needed), all three publishing services started against it, then:
 
 - Debit success → `wallet.debited`, keyed by `walletId`, correct payload.
 - Debit failure (insufficient funds) → `wallet.debit.failed`, same key, `reason` field carries
@@ -176,6 +187,9 @@ needed), both services started against it, then:
 - Credit success → `wallet.credited`.
 - Rate lock success → `rate.locked`, keyed by `transactionId`, `lockedRate` matches the response.
 - Rate lock on an unsupported pair → `rate.lock.failed`.
+- Approved charge → `payment.completed`, keyed by `transactionId`, `acquirerRef` in the payload.
+- Declined charge (magic decline-merchant-id) → `payment.failed`, same key, decline `reason` in
+  the payload.
 
 Read back with `kafka-console-consumer.sh --from-beginning --property print.key=true` inside
 the `platform-kafka` container — confirmed the message key really is the walletId/transactionId,
@@ -183,8 +197,9 @@ not just the payload field of the same name.
 
 ## Related docs
 
-- `wallet-service-implementation.md` / `fx-rate-service-implementation.md` — the "Kafka Events"
-  section in each, service-specific detail.
+- `wallet-service-implementation.md` / `fx-rate-service-implementation.md` /
+  `merchant-payment-service-implementation.md` — the "Kafka Events" section in each,
+  service-specific detail.
 - `idempotency.md` — the other cross-cutting infrastructure concern added the same way
   (independent copies of one pattern per service), same shared-Redis-vs-shared-Kafka reasoning.
-- `testing-guide.md` — the mocking pattern used in both `*EventPublisherTest` classes.
+- `testing-guide.md` — the mocking pattern used in every `*EventPublisherTest` class.

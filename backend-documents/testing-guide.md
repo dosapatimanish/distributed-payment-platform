@@ -1,14 +1,14 @@
 # Unit Testing Guide
 
-How wallet-service, fx-rate-service, and conversion-orchestrator are unit-tested, written as a
-reusable reference for the next service (Merchant Payment, Ledger) rather than a report on what
-already exists. Every pattern below is copy-pasteable — it's what's actually in
+How wallet-service, fx-rate-service, conversion-orchestrator, and merchant-payment-service are
+unit-tested, written as a reusable reference for the next service (Ledger) rather than a report
+on what already exists. Every pattern below is copy-pasteable — it's what's actually in
 `WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`, `FxRateControllerTest`,
-`ConversionServiceTest`, etc.
+`ConversionServiceTest`, `MerchantPaymentServiceTest`, etc.
 
 ## Scope decision: unit tests only, for now
 
-All three services currently have **unit tests only** — no Testcontainers/real-Postgres/
+All four services currently have **unit tests only** — no Testcontainers/real-Postgres/
 real-Redis/real-Kafka integration tests yet. Deliberate, not an oversight:
 
 | | Unit tests (done) | Testcontainers integration tests (deferred) |
@@ -35,6 +35,17 @@ test suite passed the whole time; only a real-Postgres manual `curl` test caught
 conversion-orchestrator-implementation.md's "A real bug this caught: `Persistable` and
 manually-assigned entity IDs" for the full story and fix - worth reading before adding another
 entity with an application-assigned id anywhere in this codebase.
+
+**A second, related case, from wiring merchant-payment-service into the same saga**: a test that
+mocks two different downstream clients (`FxRateServiceClient` and `WalletServiceClient`, say)
+has no way to know that a *real* fx-rate-service would reject releasing a rate lock that a
+*real* call sequence had already marked `CONSUMED` earlier in the same request - each mock only
+knows what it was individually stubbed to do, not how the real services' own state machines
+would actually interact with each other across calls. This one wasn't a mocking mistake exactly
+(the mocks did what they were told) - it's a category of bug that mocked unit tests structurally
+cannot catch regardless of how carefully they're written, only real cross-service calls can. See
+conversion-orchestrator-implementation.md's "Bug 2: consuming the rate lock too early" for the
+full story.
 
 ## What's already on the classpath — no pom.xml changes needed
 
@@ -370,12 +381,16 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | fx-rate-service | `FxRateControllerTest` | 12 | Request validation + HTTP/error-code mapping, all 4 endpoints, incl. missing-header/key-in-progress |
 | fx-rate-service | `IdempotencyGuardTest` | 8 | Identical structure to wallet-service's - the two `IdempotencyGuard` classes are deliberate copies |
 | fx-rate-service | `FxRateEventPublisherTest` | 3 | Identical structure to wallet-service's - the two publisher classes are deliberate copies |
-| conversion-orchestrator | `SagaStateMachineTest` | 30 | Every valid transition (parameterized) + every rejected-transition case (skip a step, re-delivered terminal event, backwards move, terminal-state jump) |
-| conversion-orchestrator | `ConversionServiceTest` | 8 | One test per saga path: happy path, consume-lock-fails-but-completes, rate-lock-fails, debit-fails, credit-fails, reversal-itself-fails-stays-stuck |
+| conversion-orchestrator | `SagaStateMachineTest` | 39 | Every valid transition (parameterized, incl. the merchant-payment paths) + every rejected-transition case (skip a step, re-delivered terminal event, backwards move, terminal-state jump) |
+| conversion-orchestrator | `ConversionServiceTest` | 12 | One test per saga path: happy path, consume-lock-fails-but-completes, rate-lock-fails, debit-fails, credit-fails, reversal-itself-fails-stays-stuck, merchant payment approved/declined/call-fails, post-charge debit fails (refund then compensate) |
 | conversion-orchestrator | `ConversionControllerTest` | 5 | Request validation + HTTP/error-code mapping, both endpoints |
 | conversion-orchestrator | `IdempotencyGuardTest` | 7 | Identical structure to the other two services' own - third deliberate copy |
+| merchant-payment-service | `MerchantPaymentServiceTest` | 9 | Both charge outcomes + event-publish calls, duplicate-transactionId conflict (no event on a failed save), full refund state machine |
+| merchant-payment-service | `MerchantPaymentControllerTest` | 8 | Request validation + HTTP/error-code mapping, all 3 endpoints - incl. a declined charge still returning 201 |
+| merchant-payment-service | `IdempotencyGuardTest` | 7 | Identical structure to the other services' own - fourth deliberate copy |
+| merchant-payment-service | `MerchantPaymentEventPublisherTest` | 3 | Identical structure to the other services' own event-publisher tests |
 
-**153 tests in this table** (155 total per `./mvnw test` across all three modules, including 2
+**193 tests in this table** (195 total per `./mvnw test` across all four modules, including 2
 pre-existing Spring-Initializr smoke tests not written as part of this work). Run per service:
 `cd backend/<service> && ./mvnw test`.
 
@@ -405,7 +420,9 @@ pre-existing Spring-Initializr smoke tests not written as part of this work). Ru
    `ConversionTransaction`) - otherwise Spring Data JPA's default new-vs-existing check can
    route even the first `save()` through `merge()` instead of `persist()`, silently dropping any
    `@PrePersist`-set fields from the object you already hold. No unit test with a mocked
-   repository will ever catch this - only a real database will.
+   repository will ever catch this - only a real database will. Applied from the start in
+   merchant-payment-service's `MerchantPayment` (same shape, same risk) - confirmed clean on the
+   first manual `curl` test, no repeat of the bug.
 9. Testcontainers/real-Postgres/real-Redis/real-Kafka integration tests are still a deliberate
-   gap across all three existing services — worth deciding once, for whichever service takes it
+   gap across all four existing services — worth deciding once, for whichever service takes it
    on first, rather than re-deciding per service.

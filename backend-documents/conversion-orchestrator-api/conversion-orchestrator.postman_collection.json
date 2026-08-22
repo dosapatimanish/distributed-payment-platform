@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Conversion Orchestrator",
-    "description": "Wallet-to-wallet conversion SAGA endpoints (conversion-orchestrator, port 8083). Requires wallet-service (8081) and fx-rate-service (8082) running with real wallets already created/funded - see wallet-service.postman_collection.json.",
+    "description": "Wallet-to-wallet conversion SAGA endpoints (conversion-orchestrator, port 8083), optionally followed by a merchant charge. Requires wallet-service (8081) and fx-rate-service (8082) running with real wallets already created/funded - see wallet-service.postman_collection.json - and merchant-payment-service (8084) up for the merchant-charge requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -12,7 +12,7 @@
   ],
   "item": [
     {
-      "name": "Start Conversion",
+      "name": "Start Conversion (no merchant)",
       "event": [
         {
           "listen": "test",
@@ -36,6 +36,36 @@
         "body": {
           "mode": "raw",
           "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 100.00\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/conversions", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversions"] }
+      }
+    },
+    {
+      "name": "Start Conversion + Pay Merchant (Approved)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-conversion-pay-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 50.00,\n  \"merchantId\": \"merchant-abc\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/conversions", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversions"] }
+      }
+    },
+    {
+      "name": "Start Conversion + Pay Merchant (Declined)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-conversion-pay-decline-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 30.00,\n  \"merchantId\": \"acct-decline\"\n}"
         },
         "url": { "raw": "{{baseUrl}}/api/v1/conversions", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversions"] }
       }

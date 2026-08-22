@@ -94,6 +94,14 @@ components:
         sourceCurrency: { type: string, minLength: 3, maxLength: 3 }
         destCurrency: { type: string, minLength: 3, maxLength: 3 }
         sourceAmount: { type: number, format: decimal, minimum: 0.0001 }
+        merchantId:
+          type: string
+          nullable: true
+          description: >
+            Optional. Absent/blank -> plain wallet-to-wallet conversion. Present -> after the
+            conversion, also charge this merchant for destAmount via merchant-payment-service -
+            approval spends the credited funds (net zero on the destination wallet), decline
+            triggers full compensation (both wallets reversed).
 
     ConversionResponse:
       type: object
@@ -109,7 +117,7 @@ components:
         lockedRate: { type: number, format: decimal, description: "Null if the rate lock step never succeeded" }
         sagaState:
           type: string
-          enum: [STARTED, RATE_LOCKED, SOURCE_DEBITED, DEST_CREDITED, COMPLETED, FAILED, DEBIT_FAILED, CREDIT_FAILED, COMPENSATING, SOURCE_CREDITED_BACK, LOCK_RELEASED, COMPENSATED]
+          enum: [STARTED, RATE_LOCKED, SOURCE_DEBITED, DEST_CREDITED, PAYMENT_COMPLETED, COMPLETED, FAILED, DEBIT_FAILED, CREDIT_FAILED, PAYMENT_FAILED, COMPENSATING, DEST_DEBITED_BACK, SOURCE_CREDITED_BACK, LOCK_RELEASED, COMPENSATED]
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 

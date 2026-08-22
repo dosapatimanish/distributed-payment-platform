@@ -1,7 +1,9 @@
 package com.paymentplatform.orchestrator.service;
 
 import com.paymentplatform.orchestrator.client.FxRateServiceClient;
+import com.paymentplatform.orchestrator.client.MerchantPaymentServiceClient;
 import com.paymentplatform.orchestrator.client.WalletServiceClient;
+import com.paymentplatform.orchestrator.client.dto.PaymentResponse;
 import com.paymentplatform.orchestrator.client.dto.RateLockResponse;
 import com.paymentplatform.orchestrator.domain.ConversionTransaction;
 import com.paymentplatform.orchestrator.domain.SagaState;
@@ -22,13 +24,14 @@ import java.math.RoundingMode;
 import java.util.UUID;
 
 /**
- * Drives the wallet-to-wallet conversion saga (design doc §5.3, reduced scope - see
- * {@link SagaState}'s javadoc for exactly what changed and why). Each step is a synchronous
- * REST call to wallet-service or fx-rate-service ("Synchronous REST calls" scope decision for
- * this pass - see implementation notes for the deferred async-Kafka-driven alternative), and
- * every state transition + step outcome is persisted immediately after that step resolves - not
- * batched, not deferred - so {@code conversion_transaction}/{@code saga_step_log} always
- * reflect exactly how far the saga actually got.
+ * Drives the wallet-to-wallet conversion saga, optionally followed by a merchant charge (design
+ * doc §5.3, reduced scope - see {@link SagaState}'s javadoc for exactly what changed and why).
+ * Each step is a synchronous REST call to wallet-service, fx-rate-service, or
+ * merchant-payment-service ("Synchronous REST calls" scope decision for this pass - see
+ * implementation notes for the deferred async-Kafka-driven alternative), and every state
+ * transition + step outcome is persisted immediately after that step resolves - not batched, not
+ * deferred - so {@code conversion_transaction}/{@code saga_step_log} always reflect exactly how
+ * far the saga actually got.
  *
  * <b>Deliberate gap</b>: no crash-recovery/resume. If this process dies mid-saga, the persisted
  * state accurately records where it stopped, but nothing automatically picks it back up or
@@ -45,15 +48,18 @@ public class ConversionService {
     private final SagaStepLogRepository stepLogRepository;
     private final WalletServiceClient walletClient;
     private final FxRateServiceClient fxRateClient;
+    private final MerchantPaymentServiceClient merchantPaymentClient;
 
     public ConversionService(ConversionTransactionRepository transactionRepository,
                               SagaStepLogRepository stepLogRepository,
                               WalletServiceClient walletClient,
-                              FxRateServiceClient fxRateClient) {
+                              FxRateServiceClient fxRateClient,
+                              MerchantPaymentServiceClient merchantPaymentClient) {
         this.transactionRepository = transactionRepository;
         this.stepLogRepository = stepLogRepository;
         this.walletClient = walletClient;
         this.fxRateClient = fxRateClient;
+        this.merchantPaymentClient = merchantPaymentClient;
     }
 
     public ConversionTransaction getConversion(String transactionId) {
@@ -68,10 +74,10 @@ public class ConversionService {
         // Use save()'s return value, not the object just passed in - see ConversionTransaction's
         // Persistable javadoc for why the two aren't reliably the same instance.
         txn = transactionRepository.save(txn);
-        return runSaga(txn, idempotencyKey);
+        return runSaga(txn, request, idempotencyKey);
     }
 
-    private ConversionTransaction runSaga(ConversionTransaction txn, String idempotencyKey) {
+    private ConversionTransaction runSaga(ConversionTransaction txn, ConversionRequest request, String idempotencyKey) {
         RateLockResponse lock;
         try {
             lock = fxRateClient.lockRate(txn.getSourceCurrency(), txn.getDestCurrency(), txn.getSourceAmount(),
@@ -91,7 +97,7 @@ public class ConversionService {
         } catch (RestClientException ex) {
             logStep(txn, "DEBIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.DEBIT_FAILED);
-            return compensate(txn, idempotencyKey, false);
+            return compensate(txn, idempotencyKey, false, false);
         }
         logStep(txn, "DEBIT", StepStatus.SUCCESS, "amount=" + txn.getSourceAmount());
         txn = transition(txn, SagaState.SOURCE_DEBITED);
@@ -101,13 +107,32 @@ public class ConversionService {
         } catch (RestClientException ex) {
             logStep(txn, "CREDIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.CREDIT_FAILED);
-            return compensate(txn, idempotencyKey, true);
+            return compensate(txn, idempotencyKey, false, true);
         }
         logStep(txn, "CREDIT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount());
         txn = transition(txn, SagaState.DEST_CREDITED);
 
-        // Best-effort: whether this succeeds or fails does not change the saga's outcome - the
-        // money already moved correctly at the rate captured in txn.lockedRate. See class javadoc.
+        if (request.hasMerchantId()) {
+            txn = chargeMerchant(txn, request.merchantId(), idempotencyKey);
+            if (txn.getSagaState() != SagaState.PAYMENT_COMPLETED) {
+                // The charge was declined (or the call itself failed) and compensate() already
+                // ran - whatever state it left the saga in (COMPENSATED, or stuck partway
+                // through if a reversal step itself failed), that's the final answer here. Do
+                // NOT fall through to consuming the lock or SagaState.COMPLETED below.
+                return txn;
+            }
+        }
+
+        // Only consume the lock once the saga is definitively not going to be compensated -
+        // consuming it any earlier (e.g. right after DEST_CREDITED, before knowing whether a
+        // merchant charge afterward would succeed) was a real bug caught in manual testing: a
+        // declined charge needs to release the lock during compensation, but fx-rate-service
+        // correctly refuses to release an already-CONSUMED lock ("can't un-consume" - see its
+        // own docs), so compensation got stuck one step short of COMPENSATED even though both
+        // wallet reversals had already succeeded correctly. Consuming here, after every step
+        // that could still trigger compensation has already succeeded, closes that gap. Still
+        // best-effort itself: whether *this* call succeeds or fails does not change the saga's
+        // outcome - the money already moved correctly at the rate captured in txn.lockedRate.
         try {
             fxRateClient.consumeLock(lock.lockId(), idempotencyKey + "-consume");
             logStep(txn, "CONSUME_LOCK", StepStatus.SUCCESS, "lockId=" + lock.lockId());
@@ -120,8 +145,79 @@ public class ConversionService {
         return transition(txn, SagaState.COMPLETED);
     }
 
-    private ConversionTransaction compensate(ConversionTransaction txn, String idempotencyKey, boolean reverseDebit) {
+    /**
+     * Charges the merchant for the just-converted amount, then actually spends the credited
+     * funds to pay for it - debits the destination wallet by the same amount it was just
+     * credited, so the money passes through to the merchant rather than sitting in the
+     * customer's wallet. Net effect on that wallet from this whole saga is zero once a payment
+     * is involved: +destAmount (the conversion credit) then -destAmount (spent on the charge).
+     *
+     * Unlike wallet-service/fx-rate-service, merchant-payment-service's {@code pay} always
+     * returns 2xx regardless of outcome (see {@link PaymentResponse}'s javadoc) - a decline is
+     * read from the response body, not caught as an exception, and triggers full compensation
+     * (both the credit and the debit reversed) since nothing was ever actually spent.
+     */
+    private ConversionTransaction chargeMerchant(ConversionTransaction txn, String merchantId, String idempotencyKey) {
+        PaymentResponse payment;
+        try {
+            payment = merchantPaymentClient.pay(txn.getTransactionId(), merchantId, txn.getDestAmount(),
+                    txn.getDestCurrency(), idempotencyKey + "-pay");
+        } catch (RestClientException ex) {
+            logStep(txn, "PAYMENT", StepStatus.FAILED, describe(ex));
+            txn = transition(txn, SagaState.PAYMENT_FAILED);
+            return compensate(txn, idempotencyKey, true, true);
+        }
+        if (!payment.isCompleted()) {
+            logStep(txn, "PAYMENT", StepStatus.FAILED, "paymentId=%s, status=%s".formatted(payment.paymentId(), payment.status()));
+            txn = transition(txn, SagaState.PAYMENT_FAILED);
+            return compensate(txn, idempotencyKey, true, true);
+        }
+        logStep(txn, "PAYMENT", StepStatus.SUCCESS, "paymentId=" + payment.paymentId());
+
+        try {
+            walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-spend");
+        } catch (RestClientException ex) {
+            // The acquirer has already been charged for real at this point - refund it before
+            // falling back to the normal compensation path, so a saga we're about to unwind
+            // never leaves a real external charge standing.
+            logStep(txn, "DEBIT_FOR_PAYMENT", StepStatus.FAILED, describe(ex));
+            log.error("Charged the merchant but could not debit the destination wallet for transaction {} - refunding the charge: {}",
+                    txn.getTransactionId(), ex.getMessage());
+            try {
+                merchantPaymentClient.refund(payment.paymentId());
+                logStep(txn, "REFUND_PAYMENT", StepStatus.COMPENSATED, "paymentId=" + payment.paymentId());
+            } catch (RestClientException refundEx) {
+                logStep(txn, "REFUND_PAYMENT", StepStatus.FAILED, describe(refundEx));
+                log.error("COMPENSATION FAILED for transaction {}: could not refund payment {} - manual intervention needed: {}",
+                        txn.getTransactionId(), payment.paymentId(), refundEx.getMessage());
+            }
+            txn = transition(txn, SagaState.PAYMENT_FAILED);
+            return compensate(txn, idempotencyKey, true, true);
+        }
+        logStep(txn, "DEBIT_FOR_PAYMENT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount());
+        return transition(txn, SagaState.PAYMENT_COMPLETED);
+    }
+
+    /**
+     * @param reverseCredit reverse the destination-wallet credit first (only relevant once a payment attempt has run)
+     * @param reverseDebit  reverse the source-wallet debit (irrelevant only when the debit itself never succeeded)
+     */
+    private ConversionTransaction compensate(ConversionTransaction txn, String idempotencyKey,
+                                              boolean reverseCredit, boolean reverseDebit) {
         txn = transition(txn, SagaState.COMPENSATING);
+        if (reverseCredit) {
+            try {
+                walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(),
+                        idempotencyKey + "-compensate-credit");
+                logStep(txn, "COMPENSATE_CREDIT", StepStatus.COMPENSATED, "amount=" + txn.getDestAmount());
+                txn = transition(txn, SagaState.DEST_DEBITED_BACK);
+            } catch (RestClientException ex) {
+                logStep(txn, "COMPENSATE_CREDIT", StepStatus.FAILED, describe(ex));
+                log.error("COMPENSATION FAILED for transaction {}: could not reverse the destination credit - manual intervention needed: {}",
+                        txn.getTransactionId(), ex.getMessage());
+                return txn; // stuck at COMPENSATING, not silently marked COMPENSATED when it isn't
+            }
+        }
         if (reverseDebit) {
             try {
                 walletClient.credit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(),
@@ -135,7 +231,7 @@ public class ConversionService {
                 logStep(txn, "COMPENSATE_DEBIT", StepStatus.FAILED, describe(ex));
                 log.error("COMPENSATION FAILED for transaction {}: could not reverse the source debit - manual intervention needed: {}",
                         txn.getTransactionId(), ex.getMessage());
-                return txn; // stuck at COMPENSATING, not silently marked COMPENSATED when it isn't
+                return txn;
             }
         }
         try {

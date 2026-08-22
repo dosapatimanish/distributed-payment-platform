@@ -1,0 +1,79 @@
+{
+  "info": {
+    "name": "Merchant Payment Service",
+    "description": "Mock-acquirer charge/refund APIs for the distributed payment platform (merchant-payment-service, port 8084). pay requires an Idempotency-Key header; refund is already idempotent by design. Use merchantId 'acct-decline' (configurable via merchantpayment.acquirer.decline-merchant-id) to trigger a deterministic decline.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8084" },
+    { "key": "paymentId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Pay (Approved)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('paymentId', body.paymentId);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-pay-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transactionId\": \"txn-pay-1\",\n  \"merchantId\": \"merchant-abc\",\n  \"amount\": 75.00,\n  \"currency\": \"USD\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/merchant-payments", "host": ["{{baseUrl}}"], "path": ["api", "v1", "merchant-payments"] }
+      }
+    },
+    {
+      "name": "Pay (Declined)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-pay-2" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transactionId\": \"txn-pay-2\",\n  \"merchantId\": \"acct-decline\",\n  \"amount\": 30.00,\n  \"currency\": \"USD\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/merchant-payments", "host": ["{{baseUrl}}"], "path": ["api", "v1", "merchant-payments"] }
+      }
+    },
+    {
+      "name": "Get Payment Status",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/merchant-payments/{{paymentId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "merchant-payments", "{{paymentId}}"]
+        }
+      }
+    },
+    {
+      "name": "Refund",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/merchant-payments/{{paymentId}}/refund",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "merchant-payments", "{{paymentId}}", "refund"]
+        }
+      }
+    }
+  ]
+}
