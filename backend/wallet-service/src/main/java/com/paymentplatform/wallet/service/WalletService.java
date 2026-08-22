@@ -11,6 +11,10 @@ import com.paymentplatform.wallet.exception.ReservationNotFoundException;
 import com.paymentplatform.wallet.exception.WalletConflictException;
 import com.paymentplatform.wallet.exception.WalletNotActiveException;
 import com.paymentplatform.wallet.exception.WalletNotFoundException;
+import com.paymentplatform.wallet.event.WalletCreditedEvent;
+import com.paymentplatform.wallet.event.WalletDebitFailedEvent;
+import com.paymentplatform.wallet.event.WalletDebitedEvent;
+import com.paymentplatform.wallet.event.WalletEventPublisher;
 import com.paymentplatform.wallet.repository.WalletReservationRepository;
 import com.paymentplatform.wallet.repository.WalletRepository;
 import org.slf4j.Logger;
@@ -55,15 +59,18 @@ public class WalletService {
 
     private final WalletRepository walletRepository;
     private final WalletReservationRepository reservationRepository;
+    private final WalletEventPublisher eventPublisher;
     private final TransactionTemplate transactionTemplate;
     private final Duration reservationTtl;
 
     public WalletService(WalletRepository walletRepository,
                           WalletReservationRepository reservationRepository,
+                          WalletEventPublisher eventPublisher,
                           PlatformTransactionManager transactionManager,
                           @Value("${wallet.reservation.ttl-minutes}") long reservationTtlMinutes) {
         this.walletRepository = walletRepository;
         this.reservationRepository = reservationRepository;
+        this.eventPublisher = eventPublisher;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // Force a brand-new transaction on every call, regardless of what the caller is doing -
         // this is what lets each optimistic-retry attempt start with a clean persistence context.
@@ -100,12 +107,29 @@ public class WalletService {
 
     public Wallet debit(String walletId, BigDecimal amount, String transactionId) {
         log.debug("Debiting {} {} from wallet {}", amount, transactionId, walletId);
-        return applyMutation(walletId, wallet -> debitMutation(wallet, amount));
+        try {
+            Wallet result = applyMutation(walletId, wallet -> debitMutation(wallet, amount));
+            eventPublisher.publishDebited(
+                    new WalletDebitedEvent(walletId, transactionId, amount, result.getBalance(), Instant.now()));
+            return result;
+        } catch (RuntimeException ex) {
+            // Every debit failure - not found, not active, insufficient funds, or a concurrency
+            // conflict - is reported here. The orchestrator (once it exists) needs to know a
+            // debit step failed regardless of why, to decide whether to retry or compensate.
+            eventPublisher.publishDebitFailed(
+                    new WalletDebitFailedEvent(walletId, transactionId, amount, ex.getMessage(), Instant.now()));
+            throw ex;
+        }
     }
 
     public Wallet credit(String walletId, BigDecimal amount, String transactionId) {
         log.debug("Crediting {} {} to wallet {}", amount, transactionId, walletId);
-        return applyMutation(walletId, wallet -> creditMutation(wallet, amount));
+        Wallet result = applyMutation(walletId, wallet -> creditMutation(wallet, amount));
+        // No wallet.credit.failed topic in the design doc's topic table (6.5) - only the
+        // success case is published for credits.
+        eventPublisher.publishCredited(
+                new WalletCreditedEvent(walletId, transactionId, amount, result.getBalance(), Instant.now()));
+        return result;
     }
 
     // ------------------------------------------------------------------

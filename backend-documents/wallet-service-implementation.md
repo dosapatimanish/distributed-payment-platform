@@ -20,7 +20,7 @@ PostgreSQL persistence:
 
 | Deferred | Why |
 |---|---|
-| Kafka event publishing (`wallet.debited`, etc.) | Nothing consumes these yet — the Conversion Orchestrator that will react to them doesn't exist yet. Building it now would be untestable plumbing. |
+| ~~Kafka event publishing~~ | **Done** — see [Kafka Events](#kafka-events) below. |
 | ~~Redis-backed `Idempotency-Key` handling~~ | **Done** — see [Idempotency-Key](#idempotency-key) below. |
 | Transactional Outbox pattern | Only meaningful once there's a Kafka publish step to make reliable. |
 | Oracle | Postgres is free, Docker-friendly, and close enough in SQL/locking semantics (including `SELECT ... FOR UPDATE`) to develop against. The schema was kept Oracle-portable on purpose (see below) so the eventual migration is a config/dialect change, not a rewrite. |
@@ -37,7 +37,8 @@ com.paymentplatform.wallet
 ├── service/       WalletService  (all business logic + concurrency control)
 ├── web/           WalletController + request/response DTO records
 ├── exception/     custom exceptions + GlobalExceptionHandler
-└── idempotency/   IdempotencyGuard, IdempotencyKeyInProgressException
+├── idempotency/   IdempotencyGuard, IdempotencyKeyInProgressException
+└── event/         WalletEventPublisher + event records (WalletDebitedEvent, etc.)
 ```
 
 One package per layer, matching the design doc's class list. No mapper/facade layer — DTOs
@@ -134,19 +135,45 @@ wallet-service and fx-rate-service - matches the design doc's system diagram, wh
 Redis with shared platform infra rather than owning it per-service like Postgres. Each service
 prefixes its keys (`wallet:idem:` / `fxrate:idem:`) so they can't collide.
 
+## Kafka Events
+
+See [kafka-events.md](kafka-events.md) for the full concept writeup (what/why/how, shared
+across both services) - this section covers only wallet-service-specific detail.
+
+`WalletService.debit` publishes `wallet.debited` on success or `wallet.debit.failed` on any
+failure; `credit` publishes `wallet.credited` on success only (no failure topic exists for
+credit per the design doc's topic table). Both keyed by `walletId`. `WalletEventPublisher`
+sends plain JSON strings (own `ObjectMapper.writeValueAsString`, not spring-kafka's
+`JsonSerializer` - see the Boot 4.1 gotchas section below for why) via a
+`KafkaTemplate<String, String>`, async, logging (not throwing) on a failed send.
+
+**`captureReservation` gets its event for free**: it calls `WalletService.debit` internally
+(see wallet-service-api's `06-capture-reservation.md`), so capturing a reservation publishes
+`wallet.debited`/`wallet.debit.failed` through that same call path - no separate publish logic
+needed for it. `createWallet`, `reserveFunds`, and `releaseReservation` publish nothing; they
+aren't in the design doc's topic table.
+
+**Deliberate gap, not an oversight**: this is a direct publish after commit, not a
+Transactional Outbox - if the process crashes between the DB commit and the Kafka send
+completing, the event is lost even though the mutation happened. Still a separate deferred
+item (see the table above); closing it is only worth doing once a consumer exists to actually
+depend on these events arriving reliably.
+
 ## Automated tests
 
-Unit tests only for this pass (no Testcontainers/real-DB/real-Redis integration tests yet —
-that's a separate, larger follow-up): 47 tests total, all passing (`./mvnw test`).
+Unit tests only for this pass (no Testcontainers/real-DB/real-Redis/real-Kafka integration
+tests yet — that's a separate, larger follow-up): 54 tests total, all passing (`./mvnw test`).
 
-- **`WalletServiceTest`** (22 tests) — Mockito doubles for `WalletRepository`,
-  `WalletReservationRepository`, and `PlatformTransactionManager`; no Spring context. Covers
-  every business rule (insufficient funds, wallet-not-active vs FROZEN-allows-credit, duplicate
-  wallet on both the pre-check and the DB-unique-constraint-race paths, the full reservation
-  state machine) plus the two concurrency-control paths themselves: asserts
-  `findByIdForUpdate` is used for `highContention=true` wallets and never for ordinary ones, and
-  drives the optimistic-retry loop through a losing-then-winning sequence of
-  `ObjectOptimisticLockingFailureException`s to prove the retry/backoff/give-up behavior.
+- **`WalletServiceTest`** (25 tests) — Mockito doubles for `WalletRepository`,
+  `WalletReservationRepository`, `WalletEventPublisher`, and `PlatformTransactionManager`; no
+  Spring context. Covers every business rule (insufficient funds, wallet-not-active vs
+  FROZEN-allows-credit, duplicate wallet on both the pre-check and the DB-unique-constraint-race
+  paths, the full reservation state machine) plus the two concurrency-control paths themselves:
+  asserts `findByIdForUpdate` is used for `highContention=true` wallets and never for ordinary
+  ones, and drives the optimistic-retry loop through a losing-then-winning sequence of
+  `ObjectOptimisticLockingFailureException`s to prove the retry/backoff/give-up behavior. Also
+  asserts `WalletEventPublisher` is called with the right method (published vs. failed) on the
+  right outcome for both debit and credit.
 - **`WalletControllerTest`** (14 tests) — `@WebMvcTest(WalletController.class)`, `WalletService`
   and `IdempotencyGuard` both mocked with `@MockitoBean`. The guard is stubbed as a passthrough
   by default (runs the action straight through) so most tests can focus on
@@ -158,6 +185,11 @@ that's a separate, larger follow-up): 47 tests total, all passing (`./mvnw test`
   with Mockito, a real `ObjectMapper`. Covers `checkAndReserve`/`confirm`/`release` individually
   plus `runIdempotent`'s three outcomes (fresh key runs and caches, completed key replays
   without re-running, failed key releases and rethrows).
+- **`WalletEventPublisherTest`** (4 tests) — `KafkaTemplate<String, String>` mocked, a real
+  `ObjectMapper`. Verifies each publish method sends to the right topic keyed by `walletId` with
+  the expected payload fields, plus one test proving a failed/exceptional
+  `CompletableFuture` from `kafkaTemplate.send(...)` never propagates out of the publisher (see
+  kafka-events.md).
 
 **Mocking `PlatformTransactionManager`**: `WalletService` builds its own `TransactionTemplate`
 in the constructor (see the self-invocation section above) rather than using `@Transactional`,
@@ -222,12 +254,19 @@ recorded here rather than left to be rediscovered:
   approach as the `@WebMvcTest` package move above confirmed this - `jackson-annotations` is
   still `com.fasterxml.jackson.annotation` (that part didn't move), which makes guessing at the
   right import from memory actively misleading here.
+- **`spring-kafka`'s `JsonSerializer` is still Jackson 2**, unaffected by any of the above -
+  it directly imports `com.fasterxml.jackson.databind.ObjectMapper`, confirmed the same way
+  (grepped the class bytecode in `spring-kafka-4.1.1.jar` for package references). Given this
+  project has no Jackson 2 anywhere else, pulling it in just for that one serializer felt like
+  exactly the kind of mixed-major-version mess worth avoiding - `WalletEventPublisher` uses
+  plain `StringSerializer` and does its own JSON encoding with the app's Jackson 3
+  `ObjectMapper` instead (see kafka-events.md).
 
 ## How to run it locally
 
 ```bash
 cd backend
-docker compose up -d wallet-postgres redis   # this service's Postgres + the shared Redis
+docker compose up -d wallet-postgres redis kafka   # this service's Postgres + shared Redis + shared Kafka
 
 cd wallet-service
 ./mvnw spring-boot:run        # starts the service on :8081
@@ -272,14 +311,21 @@ All done manually via `curl` (automated tests deferred, see above):
    with the same key → identical post-debit balance back, no second debit; a debit that fails
    with 422 (insufficient funds) releases its key, so retrying that *same* key with a valid
    amount right after succeeds instead of replaying the old 422 forever.
+6. **Kafka events, against a real broker** (`docker compose up -d kafka`, single-node KRaft
+   mode): debit success → `wallet.debited`; debit failure → `wallet.debit.failed`, `reason`
+   field carries the exception message; credit success → `wallet.credited`. Read back with
+   `kafka-console-consumer.sh --from-beginning --property print.key=true` inside the
+   `platform-kafka` container - confirmed the message key really is `walletId`, not just a
+   payload field of the same name. See kafka-events.md for the fx-rate-service half of this
+   verification too.
 
 ## What's next
 
-- Testcontainers integration tests against real Postgres and real Redis, to actually exercise
-  `SELECT ... FOR UPDATE`, the DB unique constraints, and the idempotency guard's `SETNX` race
-  end-to-end (deliberately out of scope for this pass - see Automated tests above).
-- Kafka event publishing (`wallet.debited`, `wallet.credited`, `wallet.debit.failed`) once the
-  Conversion Orchestrator exists to consume them.
-- Transactional Outbox pattern, once there's a Kafka publish step to make reliable.
+- Testcontainers integration tests against real Postgres, real Redis, and real Kafka, to
+  actually exercise `SELECT ... FOR UPDATE`, the DB unique constraints, the idempotency guard's
+  `SETNX` race, and partition-key ordering end-to-end (deliberately out of scope for this pass -
+  see Automated tests above).
+- Transactional Outbox pattern, now that there's a Kafka publish step to make reliable (see
+  kafka-events.md's "Deliberate simplification: no outbox, no delivery guarantee").
 - Flyway migrations, replacing `ddl-auto=update`, once the schema stabilizes.
 - Eventual Oracle migration (schema was kept portable for exactly this).

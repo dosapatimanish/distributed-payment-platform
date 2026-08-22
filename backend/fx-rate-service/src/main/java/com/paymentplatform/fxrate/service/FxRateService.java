@@ -2,6 +2,9 @@ package com.paymentplatform.fxrate.service;
 
 import com.paymentplatform.fxrate.domain.FxRateLock;
 import com.paymentplatform.fxrate.domain.RateLockStatus;
+import com.paymentplatform.fxrate.event.FxRateEventPublisher;
+import com.paymentplatform.fxrate.event.RateLockFailedEvent;
+import com.paymentplatform.fxrate.event.RateLockedEvent;
 import com.paymentplatform.fxrate.exception.RateLockConflictException;
 import com.paymentplatform.fxrate.exception.RateLockNotActiveException;
 import com.paymentplatform.fxrate.exception.RateLockNotFoundException;
@@ -33,14 +36,16 @@ public class FxRateService {
     private final FxRateCache cache;
     private final DistributedLockManager lockManager;
     private final FxRateLockRepository lockRepository;
+    private final FxRateEventPublisher eventPublisher;
     private final Duration lockTtl;
 
     public FxRateService(FxRateCache cache, DistributedLockManager lockManager,
-                          FxRateLockRepository lockRepository,
+                          FxRateLockRepository lockRepository, FxRateEventPublisher eventPublisher,
                           @Value("${fx.rate.lock.ttl-seconds}") long lockTtlSeconds) {
         this.cache = cache;
         this.lockManager = lockManager;
         this.lockRepository = lockRepository;
+        this.eventPublisher = eventPublisher;
         this.lockTtl = Duration.ofSeconds(lockTtlSeconds);
     }
 
@@ -59,6 +64,19 @@ public class FxRateService {
      * against each other, not to gate how long the resulting business-level lock is valid.
      */
     public FxRateLock lockRate(String transactionId, String base, String quote, BigDecimal amount) {
+        try {
+            FxRateLock lock = doLockRate(transactionId, base, quote, amount);
+            eventPublisher.publishRateLocked(new RateLockedEvent(
+                    transactionId, lock.getLockId(), base, quote, lock.getLockedRate(), amount, Instant.now()));
+            return lock;
+        } catch (RuntimeException ex) {
+            eventPublisher.publishRateLockFailed(
+                    new RateLockFailedEvent(transactionId, base, quote, amount, ex.getMessage(), Instant.now()));
+            throw ex;
+        }
+    }
+
+    private FxRateLock doLockRate(String transactionId, String base, String quote, BigDecimal amount) {
         String pairKey = FxRateCache.key(base, quote);
 
         for (int attempt = 1; attempt <= MAX_LOCK_ATTEMPTS; attempt++) {

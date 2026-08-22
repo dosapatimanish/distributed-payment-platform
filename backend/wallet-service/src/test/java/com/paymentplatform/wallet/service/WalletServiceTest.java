@@ -11,6 +11,7 @@ import com.paymentplatform.wallet.exception.ReservationNotFoundException;
 import com.paymentplatform.wallet.exception.WalletConflictException;
 import com.paymentplatform.wallet.exception.WalletNotActiveException;
 import com.paymentplatform.wallet.exception.WalletNotFoundException;
+import com.paymentplatform.wallet.event.WalletEventPublisher;
 import com.paymentplatform.wallet.repository.WalletReservationRepository;
 import com.paymentplatform.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -63,6 +64,9 @@ class WalletServiceTest {
     @Mock
     private PlatformTransactionManager transactionManager;
 
+    @Mock
+    private WalletEventPublisher eventPublisher;
+
     private WalletService walletService;
 
     @BeforeEach
@@ -73,7 +77,8 @@ class WalletServiceTest {
         // this stub as "unnecessary" for those.
         lenient().when(transactionManager.getTransaction(any(TransactionDefinition.class)))
                 .thenReturn(mock(TransactionStatus.class));
-        walletService = new WalletService(walletRepository, reservationRepository, transactionManager, RESERVATION_TTL_MINUTES);
+        walletService = new WalletService(
+                walletRepository, reservationRepository, eventPublisher, transactionManager, RESERVATION_TTL_MINUTES);
     }
 
     private Wallet activeWallet(String walletId, BigDecimal balance, boolean highContention) {
@@ -185,6 +190,41 @@ class WalletServiceTest {
         Wallet result = walletService.credit("w-1", new BigDecimal("25.00"), "txn-1");
 
         assertThat(result.getBalance()).isEqualByComparingTo("125.0000");
+    }
+
+    @Test
+    void debit_success_publishesDebitedEvent() {
+        Wallet wallet = activeWallet("w-1", new BigDecimal("100.0000"), false);
+        when(walletRepository.findById("w-1")).thenReturn(Optional.of(wallet));
+        when(walletRepository.save(any(Wallet.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        walletService.debit("w-1", new BigDecimal("10.00"), "txn-1");
+
+        verify(eventPublisher).publishDebited(any());
+        verify(eventPublisher, never()).publishDebitFailed(any());
+    }
+
+    @Test
+    void debit_failure_publishesDebitFailedEvent_notDebited() {
+        Wallet wallet = activeWallet("w-1", new BigDecimal("10.0000"), false);
+        when(walletRepository.findById("w-1")).thenReturn(Optional.of(wallet));
+
+        assertThatThrownBy(() -> walletService.debit("w-1", new BigDecimal("50.00"), "txn-1"))
+                .isInstanceOf(InsufficientFundsException.class);
+
+        verify(eventPublisher).publishDebitFailed(any());
+        verify(eventPublisher, never()).publishDebited(any());
+    }
+
+    @Test
+    void credit_success_publishesCreditedEvent() {
+        Wallet wallet = activeWallet("w-1", new BigDecimal("100.0000"), false);
+        when(walletRepository.findById("w-1")).thenReturn(Optional.of(wallet));
+        when(walletRepository.save(any(Wallet.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        walletService.credit("w-1", new BigDecimal("25.00"), "txn-1");
+
+        verify(eventPublisher).publishCredited(any());
     }
 
     @Test
