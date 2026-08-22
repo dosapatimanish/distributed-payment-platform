@@ -1,0 +1,157 @@
+openapi: 3.0.3
+info:
+  title: Merchant Payment Service API
+  description: >
+    Mock-acquirer merchant charge and refund endpoints for the distributed payment platform.
+    See backend-documents/merchant-payment-service-implementation.md for design notes,
+    including the deterministic mock acquirer and the Idempotency-Key deviation from the design
+    doc's literal REST contract table.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8084
+    description: Local (docker-compose Postgres, payment-postgres on host port 5437)
+
+tags:
+  - name: Payments
+    description: Charge a merchant via the mock acquirer, refund, poll status
+
+paths:
+  /api/v1/merchant-payments:
+    post:
+      tags: [Payments]
+      operationId: pay
+      summary: Charge a merchant
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentRequest' }
+            example: { transactionId: "txn-pay-1", merchantId: "merchant-abc", amount: 75.00, currency: "USD" }
+      responses:
+        "201":
+          description: >
+            Charge attempted - check `status` in the body (`COMPLETED` or `FAILED`) for the
+            real outcome. Always 201 either way; a decline is a business outcome, not a request
+            error - see merchant-payment-service-implementation.md. A retried call with the
+            same Idempotency-Key replays this exact body unchanged.
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/merchant-payments/{paymentId}" }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "409": { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/merchant-payments/{paymentId}/refund:
+    post:
+      tags: [Payments]
+      operationId: refund
+      summary: Refund a completed payment (idempotent)
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        "200":
+          description: >
+            Payment after refund (REFUNDED), or unchanged if it was already REFUNDED - this
+            endpoint is idempotent by design, no Idempotency-Key needed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResponse' }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/merchant-payments/{paymentId}:
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Poll a payment's current status
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        "200":
+          description: Current payment status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResponse' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key identifying one attempt at this charge (design doc §6.2.3, applied
+        here as a deliberate addition beyond the design doc's literal contract table - see
+        implementation notes). A retried call with the same key replays the first attempt's
+        result instead of re-running it. Missing header → 400.
+      schema: { type: string }
+
+  schemas:
+    PaymentRequest:
+      type: object
+      required: [transactionId, merchantId, amount, currency]
+      properties:
+        transactionId: { type: string, description: "The saga/business transaction this payment belongs to - UNIQUE, one payment per transaction" }
+        merchantId: { type: string }
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+
+    PaymentResponse:
+      type: object
+      properties:
+        paymentId: { type: string, format: uuid }
+        transactionId: { type: string }
+        merchantId: { type: string }
+        amount: { type: number, format: decimal }
+        currency: { type: string }
+        acquirerRef: { type: string, nullable: true, description: "Null if the charge was declined" }
+        status: { type: string, enum: [PENDING, COMPLETED, FAILED, REFUNDED] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        error: { type: string }
+        code:
+          type: string
+          enum:
+            - PAYMENT_NOT_FOUND
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_IN_PROGRESS
+            - PAYMENT_CONFLICT
+            - INVALID_PAYMENT_STATE
+            - INTERNAL_ERROR
+        message: { type: string }
+        path: { type: string }
+
+  responses:
+    ValidationError:
+      description: Missing Idempotency-Key header, or request body failed bean validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: No payment with that paymentId
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: >
+        A payment already exists for this transactionId (PAYMENT_CONFLICT), refunding a payment
+        that was never COMPLETED (INVALID_PAYMENT_STATE), or this Idempotency-Key is still in
+        progress (IDEMPOTENCY_KEY_IN_PROGRESS)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

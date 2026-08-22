@@ -16,22 +16,31 @@ see [idempotency.md](../idempotency.md).
 
 ## Prerequisites to actually run this
 
-Unlike wallet-service and fx-rate-service, this service **calls the other two** - it needs both
-running with real data already in place:
+Unlike wallet-service and fx-rate-service, this service **calls the other services** - it needs
+them running with real data already in place:
 
-1. wallet-service (`:8081`) and fx-rate-service (`:8082`) both up.
+1. wallet-service (`:8081`) and fx-rate-service (`:8082`) both up; merchant-payment-service
+   (`:8084`) up too if you're testing a request with `merchantId`.
 2. A source wallet and a destination wallet already created via wallet-service, in the
    currencies you intend to convert between, with the source wallet funded.
 3. fx-rate-service tracking that currency pair (`fx.rate.pairs` in its `application.properties`).
 
 ## Typical flows
 
-- **Happy path**: create + fund a USD wallet, create an INR wallet (both via wallet-service) →
-  `POST /conversions` with those two wallet ids → `sagaState: COMPLETED`.
+- **Happy path, no merchant**: create + fund a USD wallet, create an INR wallet (both via
+  wallet-service) → `POST /conversions` with those two wallet ids → `sagaState: COMPLETED`,
+  destination wallet keeps the converted funds.
 - **Compensation, debit-side**: same as above but request more than the source wallet's balance
   → debit fails → `sagaState: COMPENSATED`, source wallet balance unchanged.
 - **Compensation, credit-side**: request a `destWalletId` that doesn't exist → debit succeeds,
   credit fails → `sagaState: COMPENSATED`, source wallet balance restored to its original value.
+- **Happy path, with a merchant**: same as above plus `merchantId: "merchant-abc"` →
+  `sagaState: COMPLETED`, destination wallet balance **unchanged** (credited then immediately
+  spent on the charge).
+- **Compensation, merchant declines**: same but `merchantId: "acct-decline"` (the mock
+  acquirer's deterministic decline trigger, configurable via merchant-payment-service's
+  `merchantpayment.acquirer.decline-merchant-id`) → `sagaState: COMPENSATED`, both wallets'
+  balances provably unchanged.
 
 See [../conversion-orchestrator-implementation.md](../conversion-orchestrator-implementation.md)
 for the SAGA state machine diagram, the reduced-scope decisions (wallet-to-wallet only,

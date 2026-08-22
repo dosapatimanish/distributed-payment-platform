@@ -52,6 +52,24 @@ services:
       timeout: 5s
       retries: 5
 
+  payment-postgres:
+    image: postgres:16-alpine
+    container_name: payment-postgres
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: payment_app
+      POSTGRES_PASSWORD: payment_app_pw
+    ports:
+      # Host port 5437 - 5432/5433/5434/5435/5436 already taken locally.
+      - "5437:5432"
+    volumes:
+      - payment_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment_app -d payment_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Shared platform infra (design doc's system diagram groups Redis with the shared
   # infrastructure, not owned per-service like Postgres) - both wallet-service and
   # fx-rate-service connect to this one instance for Idempotency-Key storage, each under its
@@ -95,4 +113,5 @@ volumes:
   wallet_postgres_data:
   fxrate_postgres_data:
   orchestrator_postgres_data:
+  payment_postgres_data:
   redis_data:
