@@ -21,12 +21,14 @@ The Conversion Orchestrator, as a standalone Spring Boot 4.1.1 (Java 25) module 
   and the debit, in that order.
 - The same `Idempotency-Key` mechanism as the other services (design doc §6.2.3) on the
   saga-starting endpoint.
+- Ledger-service wired in as the saga's last real step before `COMPLETED` (design doc §5.3 step
+  10a) and as part of compensation (step 11b) - see "Third pass: wiring in ledger-service" below.
 
-**Built in two passes**: first the wallet-to-wallet saga alone (no merchant involved), verified
+**Built in three passes**: first the wallet-to-wallet saga alone (no merchant involved), verified
 working end to end; then the optional merchant-payment leg wired in on top, once
-merchant-payment-service existed and had been verified standalone. Both passes are covered
-below since the second one changed the state machine, the compensation logic, and caught two
-more real bugs.
+merchant-payment-service existed and had been verified standalone; then ledger-service wired in
+once it existed too. All three passes are covered below since each one changed the state
+machine and/or compensation logic, and each caught real bugs.
 
 ### Reduced scope vs. the design doc — deliberate decisions, made with the user up front
 
@@ -127,21 +129,23 @@ database without going through the validity check first.
 
 ## HTTP clients to the other services
 
-`WalletServiceClient` / `FxRateServiceClient` / `MerchantPaymentServiceClient`, all thin
-wrappers around Spring's `RestClient` (configured with a base URL per service, injected as a
-shared `RestClient.Builder` bean). Local copies of each downstream service's request/response
-DTOs live in `client.dto`, trimmed to only the fields this service actually reads, with
-`@JsonIgnoreProperties(ignoreUnknown = true)` so the other services adding fields later doesn't
-break deserialization here - same "deliberate independent copy, no shared library" pattern used
-for `IdempotencyGuard` across all services now.
+`WalletServiceClient` / `FxRateServiceClient` / `MerchantPaymentServiceClient` /
+`LedgerServiceClient`, all thin wrappers around Spring's `RestClient` (configured with a base
+URL per service, injected as a shared `RestClient.Builder` bean). Local copies of each
+downstream service's request/response DTOs live in `client.dto`, trimmed to only the fields this
+service actually reads, with `@JsonIgnoreProperties(ignoreUnknown = true)` so the other services
+adding fields later doesn't break deserialization here - same "deliberate independent copy, no
+shared library" pattern used for `IdempotencyGuard` across all services now.
 
 Every downstream call that mutates state carries its own distinct `Idempotency-Key`, derived
 from the saga's own key plus a step suffix (`{key}-lock`, `{key}-debit`, `{key}-credit`,
-`{key}-consume`, `{key}-pay`, `{key}-spend`, `{key}-compensate-debit`, `{key}-compensate-credit`)
-- each is a genuinely separate HTTP request that needs its own safe-retry identity in the target
-service's Redis, not a share of the orchestrator's own top-level key. `releaseLock` and `refund`
-don't get one - both target services' equivalent operations are already idempotent by design
-(see their own docs), so there's nothing to protect.
+`{key}-consume`, `{key}-pay`, `{key}-spend`, `{key}-compensate-debit`, `{key}-compensate-credit`,
+`{key}-ledger`, `{key}-ledger-reversal`) - each is a genuinely separate HTTP request that needs
+its own safe-retry identity in the target service's Redis, not a share of the orchestrator's own
+top-level key. `releaseLock` and `refund` don't get one - both target services' equivalent
+operations are already idempotent by design (see their own docs), so there's nothing to protect.
+`LedgerServiceClient.postEntries` discards the response body (a `List<LedgerEntryResponse>` echo
+that nothing downstream reads), same as `refund`'s `toBodilessEntity()`.
 
 **One asymmetry worth knowing**: unlike wallet-service/fx-rate-service, merchant-payment-
 service's `pay` endpoint always returns `2xx` regardless of whether the acquirer approved or
@@ -156,9 +160,9 @@ turned into a human-readable string via `describe()` for the `saga_step_log` pay
 `RestClientResponseException` subtypes carry the actual HTTP status + response body, more
 useful for debugging than a bare exception message.
 
-## Two real bugs this second pass caught
+## Three real bugs across these passes
 
-Recorded in detail because both are genuinely instructive, not just "fixed a typo" notes.
+Recorded in detail because all three are genuinely instructive, not just "fixed a typo" notes.
 
 ### Bug 1: a stale CHECK constraint from `ddl-auto=update`
 
@@ -216,9 +220,68 @@ code's logic given assumed collaborator behavior, not that the real collaborator
 state machines stay consistent with each other. Both of this pass's bugs were caught by the
 same thing - real, manually-run, cross-service verification - not by the automated suite.
 
+### Bug 3: ledger-service's `transaction_id` column too narrow for a reversal id
+
+**Symptom**: the very first live compensation scenario run *after* wiring in ledger-service
+(a declined merchant charge, full reversal) reached `sagaState: COMPENSATED` correctly, but the
+reversal ledger posting silently failed - `RECORD_LEDGER_REVERSAL` logged `FAILED` with `409
+Conflict ... value too long for type character varying(36)`.
+
+**Root cause**: `recordLedgerReversal` (see below) posts the reversal under
+`{originalTransactionId}-reversal` - a UUID (36 chars) plus a 9-char suffix, 45 chars total.
+`ledger_entry.transaction_id` was mapped `length = 36`, matching the design doc's literal
+`VARCHAR2(36)` (§6.1.5) and every other UUID-holding column in this platform - correct for a
+plain UUID, too narrow the moment a caller needs a *derived* id.
+
+**Fix**: widened `LedgerEntry.transactionId` to `length = 64` in ledger-service (see its own
+implementation notes). Caught by this pass's own live verification (the "declined merchant
+charge" scenario below) before being considered done - not by ledger-service's unit tests, which
+mock the repository and never touch a real column-length constraint (same class of gap as Bug 2
+above: a constraint two services' worth of real behavior interact through, invisible to either
+side's unit tests alone).
+
+## Third pass: wiring in ledger-service
+
+Design doc §5.3 steps 10a/11b - "record double-entry ledger" after a conversion completes,
+"record REVERSED ledger entry" during compensation. `ConversionService.recordLedgerEntries` /
+`recordLedgerReversal` build the postings; `LedgerServiceClient` sends them. Same best-effort
+placement as `consumeLock` (see its class javadoc and `SagaState`'s) - no new `SagaState` values,
+a ledger-posting failure is logged and the saga still reaches its terminal state, since the real
+money has already moved (or already been reversed) correctly regardless.
+
+**Closing the cross-currency gap** that ledger-service-implementation.md flagged as unresolved
+when that service was built standalone: `DoubleEntryValidator` only nets legs within the same
+currency, but a conversion's source-currency debit and destination-currency credit can never net
+against each other by amount alone. Resolved with a synthetic **FX clearing account**
+(`orchestrator.ledger.clearing-account-id`, default `SYSTEM-FX-CLEARING`) - standard double-entry
+technique for a cross-currency movement: the source leg pairs with a clearing leg in the source
+currency, the destination leg pairs with a clearing leg in the destination currency, so each
+currency group nets to zero independently and `DoubleEntryValidator` needed **no changes at all**.
+Used unconditionally, even when `sourceCurrency == destCurrency` (one code path, always correct;
+the extra pair of legs is harmless when there's no real spread to absorb).
+
+**Reversal postings are independent of the forward posting**, not literally "undo the same 4
+rows" - a forward posting only happens once the saga reaches `COMPLETED`, which a compensated
+saga never does, so there is nothing to reverse in the database sense. Instead,
+`recordLedgerReversal` builds legs only for whichever side(s) `compensate()` actually reversed
+(mirroring its own `reverseCredit`/`reverseDebit` flags): a `CREDIT_FAILED` compensation (source
+side only) posts 2 legs, a `PAYMENT_FAILED` compensation (both sides) posts 4, a `DEBIT_FAILED`
+compensation (nothing ever moved) posts none at all - `ledgerClient.postEntries` is never even
+called in that case.
+
+**What's deliberately not captured yet**: the merchant-charge "spend" step (`walletClient.debit`
+on the destination wallet, to actually pay for an approved charge - see `chargeMerchant`'s
+javadoc) has no ledger posting of its own. `recordLedgerEntries` always uses the destination
+wallet's balance *immediately after its own credit call*, not the later, truly-final balance
+once a charge has also been spent - so `balanceAfter` on that leg stays accurate to what it
+claims (the state right after that specific leg), at the cost of the ledger not yet reflecting
+money that subsequently left the platform to a merchant. Tracked as a clean follow-up (a second,
+small posting keyed the same way, or additional legs on the same posting) rather than folded in
+now.
+
 ## Idempotency-Key
 
-See [idempotency.md](idempotency.md) for the full concept writeup — this is one of four
+See [idempotency.md](idempotency.md) for the full concept writeup — this is one of five
 independent copies of the same `IdempotencyGuard` (design doc §6.2.3). Only `POST /conversions`
 needs one; `GET /conversions/{id}` is read-only.
 
@@ -231,7 +294,7 @@ replayed request returns the saga's already-computed final result (whatever stat
 
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as the other services): 63 tests total, all
+Unit tests only for this pass (same scope decision as the other services): 65 tests total, all
 passing (`./mvnw test`).
 
 - **`SagaStateMachineTest`** (39 tests) — pure logic, no mocks, no Spring context. Every valid
@@ -239,14 +302,17 @@ passing (`./mvnw test`).
   compensation paths (parameterized), plus explicit rejection tests: skipping a step, a
   re-delivered event after the saga is already terminal, a backwards move, jumping straight to
   a terminal state, and any transition attempted from an already-terminal state.
-- **`ConversionServiceTest`** (12 tests) — `WalletServiceClient`/`FxRateServiceClient`/
-  `MerchantPaymentServiceClient`/both repositories mocked, no real HTTP, no real DB. One test
-  per saga path: full happy path (no merchant), consume-lock-fails-but-still-completes,
-  rate-lock-fails, debit-fails, credit-fails, the reversal-itself-fails-stays-stuck case,
-  merchant payment approved (asserts the destination wallet is debited back out to pay it),
-  merchant payment declined (asserts full reversal in the correct order), the payment-call-itself-
-  fails case, and the case where the post-charge wallet debit fails after a real approved charge
-  (asserts `refund` gets called before falling back to normal compensation).
+- **`ConversionServiceTest`** (14 tests) — `WalletServiceClient`/`FxRateServiceClient`/
+  `MerchantPaymentServiceClient`/`LedgerServiceClient`/both repositories mocked, no real HTTP, no
+  real DB. One test per saga path: full happy path (no merchant, incl. asserting the exact
+  4-leg clearing-account ledger posting), consume-lock-fails-but-still-completes,
+  ledger-posting-fails-but-still-completes, rate-lock-fails, debit-fails (incl. asserting *no*
+  ledger reversal is posted - nothing ever moved), credit-fails (incl. asserting the 2-leg
+  reversal posting), the reversal-itself-fails-stays-stuck case, merchant payment approved
+  (asserts the destination wallet is debited back out to pay it), merchant payment declined
+  (asserts full reversal in the correct order, incl. the 4-leg reversal posting), the
+  payment-call-itself-fails case, and the case where the post-charge wallet debit fails after a
+  real approved charge (asserts `refund` gets called before falling back to normal compensation).
 - **`ConversionControllerTest`** (5 tests) — `@WebMvcTest(ConversionController.class)`,
   `ConversionService` and `IdempotencyGuard` both mocked with `@MockitoBean`, same passthrough-
   stub pattern as the other services' controller tests.
@@ -270,10 +336,11 @@ passing (`./mvnw test`).
 
 ```bash
 cd backend
-docker compose up -d wallet-postgres fxrate-postgres orchestrator-postgres payment-postgres redis kafka
+docker compose up -d wallet-postgres fxrate-postgres orchestrator-postgres payment-postgres ledger-postgres redis kafka
 cd ../wallet-service && ./mvnw spring-boot:run &            # :8081
 cd ../fx-rate-service && ./mvnw spring-boot:run &            # :8082
 cd ../merchant-payment-service && ./mvnw spring-boot:run &   # :8084
+cd ../ledger-service && ./mvnw spring-boot:run &             # :8085
 cd ../conversion-orchestrator && ./mvnw spring-boot:run      # :8083
 ```
 
@@ -286,7 +353,8 @@ database was first created, see Bug 1 above before assuming a `500` is something
 ## Verification performed
 
 All done manually via `curl` against real wallet-service, fx-rate-service,
-merchant-payment-service, Postgres, and Redis (automated tests are unit-level only, see above):
+merchant-payment-service, ledger-service, Postgres, and Redis (automated tests are unit-level
+only, see above):
 
 1. **Happy path, wallet-to-wallet only**: created a USD wallet and an INR wallet for the same
    user, funded the USD wallet, started a conversion for 100 USD, no `merchantId`. Result:
@@ -315,6 +383,21 @@ merchant-payment-service, Postgres, and Redis (automated tests are unit-level on
 7. **Idempotency-Key replay, merchant-payment variant**: re-sent an approved-payment request
    with the same key. Result: identical response back, destination wallet balance unchanged
    across the replay - the saga (including the merchant charge) did not re-run.
+8. **Ledger posting, happy path (no merchant)**: converted 100 USD to INR. Result:
+   `sagaState: COMPLETED`; `GET /ledger/wallets/{sourceWalletId}/statement` showed one `DEBIT`
+   entry for exactly 100.00 USD; the destination wallet showed one `CREDIT` for exactly
+   `destAmount` INR; `GET /ledger/wallets/SYSTEM-FX-CLEARING/statement` showed the matching
+   `CREDIT` (USD) and `DEBIT` (INR) clearing legs, all four keyed by the same `transactionId`.
+9. **Ledger reversal, merchant payment declined**: converted with the configured
+   decline-merchant-id. Result: `sagaState: COMPENSATED`; this is where Bug 3 above was first
+   caught (reversal posting failed with a `409`, silently, best-effort - only visible by checking
+   the ledger statements came back empty for that transaction) and re-verified clean after the
+   fix - both wallets and the clearing account then showed the correct 4-leg reversal, keyed
+   `{transactionId}-reversal`, each currency group netting to zero.
+10. **Ledger posting, merchant payment approved**: converted with a normal `merchantId`. Result:
+    `sagaState: COMPLETED`, ledger posting succeeded the same as the no-merchant case (using the
+    destination wallet's balance right after its credit, not after the subsequent spend - see
+    "What's deliberately not captured yet" above).
 
 ## What's next
 
@@ -325,8 +408,11 @@ merchant-payment-service, Postgres, and Redis (automated tests are unit-level on
 - Crash-recovery / saga resume, once the async architecture above exists to re-enter a
   persisted-but-incomplete saga.
 - Automatic retry of failed compensation steps.
-- Ledger Service, to build out the design doc's full convert-and-pay flow (`LEDGER_POSTED`) on
-  top of what this service already does.
+- A ledger posting for the merchant-charge "spend" step (see "What's deliberately not captured
+  yet" above) - the platform-to-merchant money movement isn't in the ledger yet, only the
+  underlying conversion is.
+- Testcontainers integration tests, including one that would have caught Bug 3 above for real
+  (a genuine Postgres column-length constraint, invisible to a mocked repository).
 - Testcontainers integration tests against real Postgres/Redis, plus (once async orchestration
   exists) a real Kafka broker. Bug 2 above is exactly the kind of cross-service state
   inconsistency a proper integration test - one that actually exercises fx-rate-service's real

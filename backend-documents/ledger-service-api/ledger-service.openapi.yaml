@@ -1,0 +1,152 @@
+openapi: 3.0.3
+info:
+  title: Ledger Service API
+  description: >
+    Immutable double-entry ledger for the distributed payment platform. See
+    backend-documents/ledger-service-implementation.md for design notes, including the
+    double-entry validator's current same-currency-only scope.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8085
+    description: Local (docker-compose Postgres, ledger-postgres on host port 5438)
+
+tags:
+  - name: Ledger
+    description: Post double-entry lines for a transaction, read a wallet's statement
+
+paths:
+  /api/v1/ledger/entries:
+    post:
+      tags: [Ledger]
+      operationId: postEntries
+      summary: Record a double-entry posting
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PostEntriesRequest' }
+            example:
+              transactionId: "txn-live-1"
+              entries:
+                - { walletId: "wallet-A", entryType: "DEBIT", amount: 100.00, currency: "USD", balanceAfter: 400.00 }
+                - { walletId: "wallet-B", entryType: "CREDIT", amount: 100.00, currency: "USD", balanceAfter: 600.00 }
+      responses:
+        "201":
+          description: >
+            Every line of the posting, as persisted. A retried call with the same
+            Idempotency-Key replays this exact array unchanged.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LedgerEntryResponse' }
+        "400": { $ref: '#/components/responses/ValidationOrInvariantError' }
+        "409": { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/ledger/wallets/{walletId}/statement:
+    get:
+      tags: [Ledger]
+      operationId: getStatement
+      summary: Get a wallet's full ledger history, oldest first
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      responses:
+        "200":
+          description: The wallet's ledger entries (empty array if none)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatementResponse' }
+
+components:
+  parameters:
+    WalletId:
+      name: walletId
+      in: path
+      required: true
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key identifying one attempt at this posting (design doc §6.2.3). A
+        retried call with the same key replays the first attempt's result instead of posting a
+        second time. Missing header → 400.
+      schema: { type: string }
+
+  schemas:
+    LedgerLineRequest:
+      type: object
+      required: [walletId, entryType, amount, currency, balanceAfter]
+      properties:
+        walletId: { type: string }
+        entryType: { type: string, enum: [DEBIT, CREDIT] }
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        balanceAfter: { type: number, format: decimal, description: "The wallet's balance immediately after this leg, supplied by the caller" }
+
+    PostEntriesRequest:
+      type: object
+      required: [transactionId, entries]
+      properties:
+        transactionId: { type: string, description: "One posting per transactionId - entries are append-only" }
+        entries:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/LedgerLineRequest' }
+
+    LedgerEntryResponse:
+      type: object
+      properties:
+        entryId: { type: string, format: uuid }
+        transactionId: { type: string }
+        walletId: { type: string }
+        entryType: { type: string, enum: [DEBIT, CREDIT] }
+        amount: { type: number, format: decimal }
+        currency: { type: string }
+        balanceAfter: { type: number, format: decimal }
+        createdAt: { type: string, format: date-time }
+
+    StatementResponse:
+      type: object
+      properties:
+        walletId: { type: string }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/LedgerEntryResponse' }
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        error: { type: string }
+        code:
+          type: string
+          enum:
+            - VALIDATION_FAILED
+            - INVALID_LEDGER_ENTRIES
+            - IDEMPOTENCY_KEY_IN_PROGRESS
+            - LEDGER_CONFLICT
+            - INTERNAL_ERROR
+        message: { type: string }
+        path: { type: string }
+
+  responses:
+    ValidationOrInvariantError:
+      description: >
+        Missing Idempotency-Key header, request body failed bean validation
+        (VALIDATION_FAILED), or the posting fails the double-entry invariant
+        (INVALID_LEDGER_ENTRIES)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: >
+        Entries already exist for this transactionId (LEDGER_CONFLICT), or this
+        Idempotency-Key is still in progress (IDEMPOTENCY_KEY_IN_PROGRESS)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

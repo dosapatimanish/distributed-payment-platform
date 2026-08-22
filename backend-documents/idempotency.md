@@ -1,9 +1,9 @@
 # Idempotency-Key — Concept, Rationale, and Implementation
 
 Cross-cutting concept doc, not tied to one service — wallet-service, fx-rate-service,
-conversion-orchestrator, and merchant-payment-service all implement this the same way
-(deliberate independent copies of the same `IdempotencyGuard` class, not a shared library — see
-each service's implementation-notes doc).
+conversion-orchestrator, merchant-payment-service, and ledger-service all implement this the
+same way (deliberate independent copies of the same `IdempotencyGuard` class, not a shared
+library — see each service's implementation-notes doc).
 
 ## What is idempotency
 
@@ -182,14 +182,17 @@ from replaying a retried request. Don't conflate the two when reading fx-rate-se
 | orchestrator `getConversion` (`GET /conversions/{id}`) | No | Read-only, naturally idempotent. |
 | merchant-payment `pay` (`POST /merchant-payments`) | Yes | Not called out in the design doc's REST contract table for this endpoint (it lists only the `transaction_id` UNIQUE constraint) — added anyway, same reasoning as fx-rate's `lockRate`: the constraint alone turns a legitimate retry into a `409` error, not a replay. See merchant-payment-service-implementation.md for the full note on this deviation. |
 | merchant-payment `refund`, `getPayment` | No | `refund` is already idempotent at the business layer (no-op on an already-`REFUNDED` payment, design doc §6.4); `getPayment` is read-only. |
+| ledger `postEntries` (`POST /ledger/entries`) | Yes | Same reasoning as merchant-payment's `pay`: the design doc doesn't call out a header for this endpoint, but the append-only `LedgerConflictException` guard alone would turn a legitimate retry into a `409` error rather than a replay. See ledger-service-implementation.md. |
+| ledger `getStatement` | No | Read-only, naturally idempotent. |
 
 ## Testing without a real Redis
 
 Unit-tested by mocking `StringRedisTemplate` and its nested `ValueOperations` (Mockito) — see
 `testing-guide.md`'s "Pattern 4 — testing a Redis-backed component without real Redis" for the
-full pattern and code. `IdempotencyGuardTest` exists in all four services (9 tests in
+full pattern and code. `IdempotencyGuardTest` exists in all five services (9 tests in
 wallet-service, 8 in fx-rate-service, 7 in conversion-orchestrator, 7 in
-merchant-payment-service, identical structure since the classes are deliberate copies).
+merchant-payment-service, 7 in ledger-service, identical structure since the classes are
+deliberate copies).
 
 This proves `IdempotencyGuard`'s own logic is correct given whatever `StringRedisTemplate`
 returns — it does **not** prove the real `SETNX` race resolves correctly against a real Redis
@@ -202,9 +205,9 @@ conversion-orchestrator-implementation.md's "Verification performed".
 ## Related docs
 
 - `wallet-service-implementation.md` / `fx-rate-service-implementation.md` /
-  `conversion-orchestrator-implementation.md` / `merchant-payment-service-implementation.md` —
-  the "Idempotency-Key" section in each, with the manual `curl`-against-real-Redis verification
-  performed.
+  `conversion-orchestrator-implementation.md` / `merchant-payment-service-implementation.md` /
+  `ledger-service-implementation.md` — the "Idempotency-Key" section in each, with the manual
+  `curl`-against-real-Redis verification performed.
 - `wallet-service-api/01-create-wallet.md` (and siblings 03-07) / `fx-rate-service-api/02-lock-rate.md`
   (and 03-consume-lock.md) — per-endpoint request/error-table detail.
 - `testing-guide.md` — Pattern 4, the mocking approach used in `IdempotencyGuardTest`.

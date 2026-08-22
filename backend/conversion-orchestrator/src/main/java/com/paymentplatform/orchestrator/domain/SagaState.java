@@ -3,9 +3,11 @@ package com.paymentplatform.orchestrator.domain;
 /**
  * States for the conversion saga this service drives (design doc §6.6, adapted - see
  * {@code conversion-orchestrator-implementation.md}'s "Reduced scope vs the design doc's state
- * table" for exactly what changed and why). Still no Ledger service, so there is no
- * {@code LEDGER_POSTED} state; {@code PAYMENT_COMPLETED} transitions straight to
- * {@code COMPLETED}. Unlike the design doc's table, the merchant-payment leg is optional here -
+ * table" for exactly what changed and why). Ledger-service is now wired in, but deliberately
+ * without a {@code LEDGER_POSTED} state - recording to it is best-effort, the same way
+ * {@code consumeLock} is (see {@code ConversionService}'s class javadoc), so it doesn't need one
+ * either; {@code PAYMENT_COMPLETED} still transitions straight to {@code COMPLETED}. Unlike the
+ * design doc's table, the merchant-payment leg is optional here -
  * a request without a {@code merchantId} skips it entirely (wallet-to-wallet conversion only,
  * no merchant involved) and goes straight from {@code DEST_CREDITED} to {@code COMPLETED}.
  *

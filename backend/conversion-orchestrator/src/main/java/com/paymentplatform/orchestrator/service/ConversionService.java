@@ -1,10 +1,14 @@
 package com.paymentplatform.orchestrator.service;
 
 import com.paymentplatform.orchestrator.client.FxRateServiceClient;
+import com.paymentplatform.orchestrator.client.LedgerServiceClient;
 import com.paymentplatform.orchestrator.client.MerchantPaymentServiceClient;
 import com.paymentplatform.orchestrator.client.WalletServiceClient;
+import com.paymentplatform.orchestrator.client.dto.LedgerEntryType;
+import com.paymentplatform.orchestrator.client.dto.LedgerLineRequest;
 import com.paymentplatform.orchestrator.client.dto.PaymentResponse;
 import com.paymentplatform.orchestrator.client.dto.RateLockResponse;
+import com.paymentplatform.orchestrator.client.dto.WalletResponse;
 import com.paymentplatform.orchestrator.domain.ConversionTransaction;
 import com.paymentplatform.orchestrator.domain.SagaState;
 import com.paymentplatform.orchestrator.domain.SagaStepLog;
@@ -16,11 +20,15 @@ import com.paymentplatform.orchestrator.saga.SagaStateMachine;
 import com.paymentplatform.orchestrator.web.ConversionRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -37,6 +45,14 @@ import java.util.UUID;
  * state accurately records where it stopped, but nothing automatically picks it back up or
  * retries the next step on restart - that requires the async-Kafka-driven architecture (an
  * {@code @KafkaListener} re-entering the flow) this pass deliberately deferred.
+ *
+ * <p>Recording to ledger-service (design doc §5.3 steps 10a/11b) is wired in the same
+ * best-effort way as {@code consumeLock} below: attempted once the saga's own wallet/FX/payment
+ * outcome is already final, failures are logged (not thrown), and the saga still reaches
+ * {@code COMPLETED}/{@code COMPENSATED} either way - a missing ledger row is an audit-trail gap
+ * to notice and fix, not a reason to leave real, already-moved money in a stuck saga state. No
+ * new {@link SagaState} values were added for this (see its javadoc) - same reasoning as
+ * {@code consumeLock} having none either.
  */
 @Service
 public class ConversionService {
@@ -49,17 +65,23 @@ public class ConversionService {
     private final WalletServiceClient walletClient;
     private final FxRateServiceClient fxRateClient;
     private final MerchantPaymentServiceClient merchantPaymentClient;
+    private final LedgerServiceClient ledgerClient;
+    private final String clearingAccountId;
 
     public ConversionService(ConversionTransactionRepository transactionRepository,
                               SagaStepLogRepository stepLogRepository,
                               WalletServiceClient walletClient,
                               FxRateServiceClient fxRateClient,
-                              MerchantPaymentServiceClient merchantPaymentClient) {
+                              MerchantPaymentServiceClient merchantPaymentClient,
+                              LedgerServiceClient ledgerClient,
+                              @Value("${orchestrator.ledger.clearing-account-id}") String clearingAccountId) {
         this.transactionRepository = transactionRepository;
         this.stepLogRepository = stepLogRepository;
         this.walletClient = walletClient;
         this.fxRateClient = fxRateClient;
         this.merchantPaymentClient = merchantPaymentClient;
+        this.ledgerClient = ledgerClient;
+        this.clearingAccountId = clearingAccountId;
     }
 
     public ConversionTransaction getConversion(String transactionId) {
@@ -92,8 +114,9 @@ public class ConversionService {
         logStep(txn, "RATE_LOCK", StepStatus.SUCCESS, "lockId=%s, rate=%s".formatted(lock.lockId(), lock.lockedRate()));
         txn = transition(txn, SagaState.RATE_LOCKED);
 
+        WalletResponse debitResult;
         try {
-            walletClient.debit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(), idempotencyKey + "-debit");
+            debitResult = walletClient.debit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(), idempotencyKey + "-debit");
         } catch (RestClientException ex) {
             logStep(txn, "DEBIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.DEBIT_FAILED);
@@ -102,8 +125,9 @@ public class ConversionService {
         logStep(txn, "DEBIT", StepStatus.SUCCESS, "amount=" + txn.getSourceAmount());
         txn = transition(txn, SagaState.SOURCE_DEBITED);
 
+        WalletResponse creditResult;
         try {
-            walletClient.credit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-credit");
+            creditResult = walletClient.credit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-credit");
         } catch (RestClientException ex) {
             logStep(txn, "CREDIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.CREDIT_FAILED);
@@ -122,6 +146,13 @@ public class ConversionService {
                 return txn;
             }
         }
+
+        // Records the conversion's own double-entry effect (design doc §5.3 step 10a) - the
+        // balances used here are each wallet's balance immediately after its own debit/credit
+        // call above, not affected by a later merchant-charge "spend" debit (see chargeMerchant's
+        // javadoc) - that subsequent movement isn't captured in the ledger yet, a deliberately
+        // deferred follow-up (see implementation notes).
+        recordLedgerEntries(txn, idempotencyKey, debitResult.balance(), creditResult.balance());
 
         // Only consume the lock once the saga is definitively not going to be compensated -
         // consuming it any earlier (e.g. right after DEST_CREDITED, before knowing whether a
@@ -205,10 +236,12 @@ public class ConversionService {
     private ConversionTransaction compensate(ConversionTransaction txn, String idempotencyKey,
                                               boolean reverseCredit, boolean reverseDebit) {
         txn = transition(txn, SagaState.COMPENSATING);
+        BigDecimal destBalanceAfterReversal = null;
         if (reverseCredit) {
             try {
-                walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(),
+                WalletResponse result = walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(),
                         idempotencyKey + "-compensate-credit");
+                destBalanceAfterReversal = result.balance();
                 logStep(txn, "COMPENSATE_CREDIT", StepStatus.COMPENSATED, "amount=" + txn.getDestAmount());
                 txn = transition(txn, SagaState.DEST_DEBITED_BACK);
             } catch (RestClientException ex) {
@@ -218,10 +251,12 @@ public class ConversionService {
                 return txn; // stuck at COMPENSATING, not silently marked COMPENSATED when it isn't
             }
         }
+        BigDecimal sourceBalanceAfterReversal = null;
         if (reverseDebit) {
             try {
-                walletClient.credit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(),
+                WalletResponse result = walletClient.credit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(),
                         idempotencyKey + "-compensate-debit");
+                sourceBalanceAfterReversal = result.balance();
                 logStep(txn, "COMPENSATE_DEBIT", StepStatus.COMPENSATED, "amount=" + txn.getSourceAmount());
                 txn = transition(txn, SagaState.SOURCE_CREDITED_BACK);
             } catch (RestClientException ex) {
@@ -244,7 +279,72 @@ public class ConversionService {
                     txn.getFxLockId(), txn.getTransactionId(), ex.getMessage());
             return txn; // stuck one state short of COMPENSATED
         }
+        // Records that this transaction touched real money before being unwound (design doc §5.3
+        // step 11b "record REVERSED ledger entry") - there was never a forward posting to reverse
+        // (that only happens once the saga reaches COMPLETED, which it never does on this path),
+        // so this is its own, independent audit record of the reversal itself, best-effort same
+        // as the forward posting.
+        if (reverseCredit || reverseDebit) {
+            recordLedgerReversal(txn, idempotencyKey, reverseCredit, reverseDebit, sourceBalanceAfterReversal, destBalanceAfterReversal);
+        }
         return transition(txn, SagaState.COMPENSATED);
+    }
+
+    /**
+     * Builds the double-entry legs for one posting (design doc §6.1.5's net-to-zero invariant)
+     * using a synthetic FX clearing account for the currency conversion - standard double-entry
+     * technique for a cross-currency movement, where the source-currency debit and
+     * destination-currency credit can never net against each other by amount alone. Always uses
+     * the clearing account, even when {@code sourceCurrency == destCurrency} (a same-currency
+     * "conversion", e.g. rate 1.0) - one code path, always correct, the extra pair of clearing
+     * legs is harmless. See ledger-service-implementation.md's "Double-entry validator - current
+     * scope" for the gap this closes.
+     */
+    private void recordLedgerEntries(ConversionTransaction txn, String idempotencyKey,
+                                      BigDecimal sourceBalanceAfter, BigDecimal destBalanceAfter) {
+        List<LedgerLineRequest> entries = List.of(
+                new LedgerLineRequest(txn.getSourceWalletId(), LedgerEntryType.DEBIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfter),
+                new LedgerLineRequest(clearingAccountId, LedgerEntryType.CREDIT, txn.getSourceAmount(), txn.getSourceCurrency(), BigDecimal.ZERO),
+                new LedgerLineRequest(clearingAccountId, LedgerEntryType.DEBIT, txn.getDestAmount(), txn.getDestCurrency(), BigDecimal.ZERO),
+                new LedgerLineRequest(txn.getDestWalletId(), LedgerEntryType.CREDIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfter)
+        );
+        try {
+            ledgerClient.postEntries(txn.getTransactionId(), entries, idempotencyKey + "-ledger");
+            logStep(txn, "RECORD_LEDGER", StepStatus.SUCCESS, "entries=" + entries.size());
+        } catch (RestClientException ex) {
+            logStep(txn, "RECORD_LEDGER", StepStatus.FAILED, describe(ex));
+            log.warn("Failed to record ledger entries for transaction {} (saga still completes): {}",
+                    txn.getTransactionId(), ex.getMessage());
+        }
+    }
+
+    /**
+     * Mirror image of {@link #recordLedgerEntries} - only the legs for whichever side(s) actually
+     * got reversed (matching {@code compensate}'s own {@code reverseCredit}/{@code reverseDebit}
+     * flags), each still paired with its own clearing-account leg so every currency group still
+     * nets to zero independently, whether one side reversed or both.
+     */
+    private void recordLedgerReversal(ConversionTransaction txn, String idempotencyKey,
+                                       boolean reverseCredit, boolean reverseDebit,
+                                       BigDecimal sourceBalanceAfterReversal, BigDecimal destBalanceAfterReversal) {
+        List<LedgerLineRequest> entries = new ArrayList<>();
+        if (reverseDebit) {
+            entries.add(new LedgerLineRequest(txn.getSourceWalletId(), LedgerEntryType.CREDIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfterReversal));
+            entries.add(new LedgerLineRequest(clearingAccountId, LedgerEntryType.DEBIT, txn.getSourceAmount(), txn.getSourceCurrency(), BigDecimal.ZERO));
+        }
+        if (reverseCredit) {
+            entries.add(new LedgerLineRequest(txn.getDestWalletId(), LedgerEntryType.DEBIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfterReversal));
+            entries.add(new LedgerLineRequest(clearingAccountId, LedgerEntryType.CREDIT, txn.getDestAmount(), txn.getDestCurrency(), BigDecimal.ZERO));
+        }
+        String reversalTransactionId = txn.getTransactionId() + "-reversal";
+        try {
+            ledgerClient.postEntries(reversalTransactionId, entries, idempotencyKey + "-ledger-reversal");
+            logStep(txn, "RECORD_LEDGER_REVERSAL", StepStatus.SUCCESS, "entries=" + entries.size());
+        } catch (RestClientException ex) {
+            logStep(txn, "RECORD_LEDGER_REVERSAL", StepStatus.FAILED, describe(ex));
+            log.warn("Failed to record ledger reversal entries for transaction {} (compensation still completes): {}",
+                    txn.getTransactionId(), ex.getMessage());
+        }
     }
 
     /** @return the saved, fully-populated instance - see ConversionTransaction's Persistable javadoc for why this must be reassigned, not the passed-in {@code txn} relied on afterward. */

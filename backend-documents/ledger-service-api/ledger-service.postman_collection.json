@@ -1,0 +1,53 @@
+{
+  "info": {
+    "name": "Ledger Service",
+    "description": "Double-entry ledger APIs for the distributed payment platform (ledger-service, port 8085). postEntries requires an Idempotency-Key header; getStatement is read-only.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8085" }
+  ],
+  "item": [
+    {
+      "name": "Post Entries (Balanced)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-ledger-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transactionId\": \"txn-postman-1\",\n  \"entries\": [\n    { \"walletId\": \"wallet-A\", \"entryType\": \"DEBIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 400.00 },\n    { \"walletId\": \"wallet-B\", \"entryType\": \"CREDIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 600.00 }\n  ]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/ledger/entries", "host": ["{{baseUrl}}"], "path": ["api", "v1", "ledger", "entries"] }
+      }
+    },
+    {
+      "name": "Post Entries (Unbalanced - triggers INVALID_LEDGER_ENTRIES)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-ledger-2" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transactionId\": \"txn-postman-2\",\n  \"entries\": [\n    { \"walletId\": \"wallet-A\", \"entryType\": \"DEBIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 300.00 },\n    { \"walletId\": \"wallet-B\", \"entryType\": \"CREDIT\", \"amount\": 90.00, \"currency\": \"USD\", \"balanceAfter\": 690.00 }\n  ]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/ledger/entries", "host": ["{{baseUrl}}"], "path": ["api", "v1", "ledger", "entries"] }
+      }
+    },
+    {
+      "name": "Get Statement",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/ledger/wallets/wallet-A/statement",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "ledger", "wallets", "wallet-A", "statement"]
+        }
+      }
+    }
+  ]
+}
