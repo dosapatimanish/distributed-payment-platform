@@ -292,6 +292,14 @@ the idempotency check happening *before* any state-changing call - exactly what
 replayed request returns the saga's already-computed final result (whatever state it ended in -
 `COMPLETED`, `FAILED`, or `COMPENSATED`) without re-running any part of it.
 
+## Observability
+
+See [observability.md](observability.md) for the full concept writeup. This service's own
+contribution: `saga_state_transitions_total{state=...}`, a Micrometer counter incremented inside
+the shared `transition()` helper — the single choke-point every saga state change goes through,
+happy-path and compensation alike — so one instrumentation point covers the whole state machine
+(design doc §5.4's "saga-state dashboards" NFR metric).
+
 ## Automated tests
 
 Unit tests only for this pass (same scope decision as the other services): 65 tests total, all

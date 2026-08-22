@@ -172,6 +172,5 @@ All done manually via `curl` against real Postgres and Redis:
   implementation.md's "What's deliberately not captured yet".
 - Testcontainers integration tests — would have caught Bug 3 above for real (a genuine column-
   length constraint), where a mocked-repository unit test structurally cannot.
-- Grafana + Prometheus observability — this is the last of the five core services, a natural
-  point to add Micrometer/`/actuator/prometheus` across all five at once rather than one at a
-  time.
+- ~~Grafana + Prometheus observability~~ — **Done**, across all five services at once — see
+  [observability.md](observability.md).

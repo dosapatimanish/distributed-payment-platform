@@ -159,6 +159,14 @@ completing, the event is lost even though the mutation happened. Still a separat
 item (see the table above); closing it is only worth doing once a consumer exists to actually
 depend on these events arriving reliably.
 
+## Observability
+
+See [observability.md](observability.md) for the full concept writeup. This service's own
+contribution: `wallet_optimistic_lock_retries_total`, a Micrometer counter incremented once per
+lost optimistic-lock race in `applyWithOptimisticRetry` (design doc §5.4's "optimistic-lock
+retry rate" NFR metric) — answers "how contended are wallets right now" directly, rather than
+inferring it from log volume.
+
 ## Automated tests
 
 Unit tests only for this pass (no Testcontainers/real-DB/real-Redis/real-Kafka integration
