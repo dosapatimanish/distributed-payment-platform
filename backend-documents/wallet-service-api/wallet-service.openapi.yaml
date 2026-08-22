@@ -1,0 +1,290 @@
+openapi: 3.0.3
+info:
+  title: Wallet Service API
+  description: >
+    Wallet lifecycle (create, balance, debit, credit) and reservation (hold / capture / release)
+    endpoints for the distributed payment platform. See
+    backend-documents/wallet-service-implementation.md for design notes.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8081
+    description: Local (docker-compose Postgres)
+
+tags:
+  - name: Wallets
+    description: Wallet lifecycle - create, read balance, debit, credit
+  - name: Reservations
+    description: Holds against a wallet's balance - reserve, capture, release
+
+paths:
+  /api/v1/wallets:
+    post:
+      tags: [Wallets]
+      operationId: createWallet
+      summary: Create a wallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWalletRequest' }
+            example: { userId: "user-123", currency: "USD", highContention: false }
+      responses:
+        "201":
+          description: Wallet created
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/wallets/{walletId}" }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "409": { $ref: '#/components/responses/DuplicateWallet' }
+
+  /api/v1/wallets/{walletId}/balance:
+    get:
+      tags: [Wallets]
+      operationId: getBalance
+      summary: Get current balance
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      responses:
+        "200":
+          description: Current balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BalanceResponse' }
+        "404": { $ref: '#/components/responses/WalletNotFound' }
+
+  /api/v1/wallets/{walletId}/debit:
+    post:
+      tags: [Wallets]
+      operationId: debitWallet
+      summary: Debit a wallet (immediate, no hold)
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DebitRequest' }
+            example: { amount: 50.00, transactionId: "txn-001" }
+      responses:
+        "200":
+          description: Wallet after debit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "404": { $ref: '#/components/responses/WalletNotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+        "422": { $ref: '#/components/responses/InsufficientFunds' }
+
+  /api/v1/wallets/{walletId}/credit:
+    post:
+      tags: [Wallets]
+      operationId: creditWallet
+      summary: Credit a wallet
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreditRequest' }
+            example: { amount: 100.00, transactionId: "txn-002" }
+      responses:
+        "200":
+          description: Wallet after credit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "404": { $ref: '#/components/responses/WalletNotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/wallets/{walletId}/reserve:
+    post:
+      tags: [Reservations]
+      operationId: reserveFunds
+      summary: Place a hold against a wallet's balance
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReserveRequest' }
+            example: { amount: 25.00, transactionId: "txn-003" }
+      responses:
+        "201":
+          description: Reservation created (HELD)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReservationResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "404": { $ref: '#/components/responses/WalletNotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+        "422": { $ref: '#/components/responses/InsufficientFunds' }
+
+  /api/v1/wallets/reservations/{reservationId}/capture:
+    post:
+      tags: [Reservations]
+      operationId: captureReservation
+      summary: Capture a held reservation (performs the real debit)
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      responses:
+        "200":
+          description: Wallet after the debit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletResponse' }
+        "404": { $ref: '#/components/responses/ReservationNotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+        "422": { $ref: '#/components/responses/InsufficientFunds' }
+
+  /api/v1/wallets/reservations/{reservationId}/release:
+    post:
+      tags: [Reservations]
+      operationId: releaseReservation
+      summary: Release a held reservation (frees the hold, no balance change)
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      responses:
+        "200":
+          description: Wallet (unchanged balance)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletResponse' }
+        "404": { $ref: '#/components/responses/ReservationNotFound' }
+        "409": { $ref: '#/components/responses/Conflict' }
+
+components:
+  parameters:
+    WalletId:
+      name: walletId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ReservationId:
+      name: reservationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    CreateWalletRequest:
+      type: object
+      required: [userId, currency]
+      properties:
+        userId: { type: string }
+        currency: { type: string, minLength: 3, maxLength: 3, description: "ISO 4217, e.g. USD" }
+        highContention: { type: boolean, default: false, description: "true routes this wallet through pessimistic locking instead of optimistic retry" }
+
+    DebitRequest:
+      type: object
+      required: [amount, transactionId]
+      properties:
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        transactionId: { type: string }
+
+    CreditRequest:
+      type: object
+      required: [amount, transactionId]
+      properties:
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        transactionId: { type: string }
+
+    ReserveRequest:
+      type: object
+      required: [amount, transactionId]
+      properties:
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        transactionId: { type: string }
+
+    WalletResponse:
+      type: object
+      properties:
+        walletId: { type: string, format: uuid }
+        userId: { type: string }
+        currency: { type: string }
+        balance: { type: number, format: decimal }
+        status: { type: string, enum: [ACTIVE, FROZEN, CLOSED] }
+        highContention: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    BalanceResponse:
+      type: object
+      properties:
+        walletId: { type: string, format: uuid }
+        currency: { type: string }
+        balance: { type: number, format: decimal }
+        status: { type: string, enum: [ACTIVE, FROZEN, CLOSED] }
+
+    ReservationResponse:
+      type: object
+      properties:
+        reservationId: { type: string, format: uuid }
+        walletId: { type: string, format: uuid }
+        transactionId: { type: string }
+        amount: { type: number, format: decimal }
+        status: { type: string, enum: [HELD, CAPTURED, RELEASED] }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        error: { type: string }
+        code:
+          type: string
+          enum:
+            - WALLET_NOT_FOUND
+            - RESERVATION_NOT_FOUND
+            - INSUFFICIENT_FUNDS
+            - WALLET_NOT_ACTIVE
+            - INVALID_RESERVATION_STATE
+            - WALLET_CONFLICT
+            - DUPLICATE_WALLET
+            - WALLET_LOCK_TIMEOUT
+            - DATA_CONFLICT
+            - VALIDATION_FAILED
+            - INTERNAL_ERROR
+        message: { type: string }
+        path: { type: string }
+
+  responses:
+    ValidationError:
+      description: Request failed bean validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    WalletNotFound:
+      description: No wallet with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ReservationNotFound:
+      description: No reservation with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    DuplicateWallet:
+      description: A wallet for this (userId, currency) already exists
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InsufficientFunds:
+      description: Amount exceeds available balance
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: >
+        Wallet not in a valid state for this operation, reservation already
+        captured/released, optimistic-lock retries exhausted, or a pessimistic-lock timeout.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

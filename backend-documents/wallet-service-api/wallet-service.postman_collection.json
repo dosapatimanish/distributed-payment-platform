@@ -1,0 +1,135 @@
+{
+  "info": {
+    "name": "Wallet Service",
+    "description": "Wallet lifecycle + reservation APIs for the distributed payment platform (wallet-service, port 8081).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8081" },
+    { "key": "walletId", "value": "" },
+    { "key": "reservationId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Create Wallet",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('walletId', body.walletId);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"user-123\",\n  \"currency\": \"USD\",\n  \"highContention\": false\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/v1/wallets", "host": ["{{baseUrl}}"], "path": ["api", "v1", "wallets"] }
+      }
+    },
+    {
+      "name": "Get Balance",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/{{walletId}}/balance",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "{{walletId}}", "balance"]
+        }
+      }
+    },
+    {
+      "name": "Credit Wallet",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-002\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/{{walletId}}/credit",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "{{walletId}}", "credit"]
+        }
+      }
+    },
+    {
+      "name": "Debit Wallet",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 50.00,\n  \"transactionId\": \"txn-001\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/{{walletId}}/debit",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "{{walletId}}", "debit"]
+        }
+      }
+    },
+    {
+      "name": "Reserve Funds",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('reservationId', body.reservationId);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 25.00,\n  \"transactionId\": \"txn-003\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/{{walletId}}/reserve",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "{{walletId}}", "reserve"]
+        }
+      }
+    },
+    {
+      "name": "Capture Reservation",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/reservations/{{reservationId}}/capture",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "reservations", "{{reservationId}}", "capture"]
+        }
+      }
+    },
+    {
+      "name": "Release Reservation",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/wallets/reservations/{{reservationId}}/release",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "wallets", "reservations", "{{reservationId}}", "release"]
+        }
+      }
+    }
+  ]
+}
