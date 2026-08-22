@@ -1,0 +1,185 @@
+openapi: 3.0.3
+info:
+  title: FX Rate Service API
+  description: >
+    Current-rate quoting and short-lived rate-lock endpoints for the distributed payment
+    platform. See backend-documents/fx-rate-service-implementation.md for design notes.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8082
+    description: Local (docker-compose Postgres, fxrate-postgres on host port 5435)
+
+tags:
+  - name: Rates
+    description: Current live rate (simulated feed)
+  - name: Rate Locks
+    description: Short-lived hold on a specific rate for one conversion transaction
+
+paths:
+  /api/v1/fx/rates/{base}/{quote}:
+    get:
+      tags: [Rates]
+      operationId: getCurrentRate
+      summary: Get the current cached rate for a currency pair
+      parameters:
+        - $ref: '#/components/parameters/Base'
+        - $ref: '#/components/parameters/Quote'
+      responses:
+        "200":
+          description: Current rate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateResponse' }
+        "404": { $ref: '#/components/responses/UnsupportedPair' }
+
+  /api/v1/fx/rate-lock:
+    post:
+      tags: [Rate Locks]
+      operationId: lockRate
+      summary: Lock the current rate for a transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RateLockRequest' }
+            example: { baseCurrency: "USD", quoteCurrency: "INR", amount: 100.00, transactionId: "txn-fx-001" }
+      responses:
+        "201":
+          description: Rate lock created (ACTIVE)
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/fx/rate-lock/{lockId}" }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateLockResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
+        "404": { $ref: '#/components/responses/UnsupportedPair' }
+        "409": { $ref: '#/components/responses/RateLockConflict' }
+
+  /api/v1/fx/rate-lock/{lockId}/consume:
+    post:
+      tags: [Rate Locks]
+      operationId: consumeLock
+      summary: Mark a rate lock as consumed (the locked rate was actually used)
+      parameters:
+        - $ref: '#/components/parameters/LockId'
+      responses:
+        "200":
+          description: Lock after consuming (CONSUMED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateLockResponse' }
+        "404": { $ref: '#/components/responses/LockNotFound' }
+        "409": { $ref: '#/components/responses/LockNotActive' }
+
+  /api/v1/fx/rate-lock/{lockId}:
+    delete:
+      tags: [Rate Locks]
+      operationId: releaseLock
+      summary: Release a rate lock (idempotent)
+      parameters:
+        - $ref: '#/components/parameters/LockId'
+      responses:
+        "200":
+          description: Lock after release (RELEASED, or unchanged if already RELEASED/EXPIRED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateLockResponse' }
+        "404": { $ref: '#/components/responses/LockNotFound' }
+        "409": { $ref: '#/components/responses/LockNotActive' }
+
+components:
+  parameters:
+    Base:
+      name: base
+      in: path
+      required: true
+      schema: { type: string, minLength: 3, maxLength: 3 }
+      example: USD
+    Quote:
+      name: quote
+      in: path
+      required: true
+      schema: { type: string, minLength: 3, maxLength: 3 }
+      example: INR
+    LockId:
+      name: lockId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    RateResponse:
+      type: object
+      properties:
+        baseCurrency: { type: string }
+        quoteCurrency: { type: string }
+        rate: { type: number, format: decimal }
+        source: { type: string, description: "Feed provider id - SIMULATED_FEED until a real provider is wired in" }
+        effectiveAt: { type: string, format: date-time }
+
+    RateLockRequest:
+      type: object
+      required: [baseCurrency, quoteCurrency, amount, transactionId]
+      properties:
+        baseCurrency: { type: string, minLength: 3, maxLength: 3 }
+        quoteCurrency: { type: string, minLength: 3, maxLength: 3 }
+        amount: { type: number, format: decimal, minimum: 0.0001 }
+        transactionId: { type: string, description: "The SAGA/business transaction this lock belongs to - UNIQUE, one active lock per transaction" }
+
+    RateLockResponse:
+      type: object
+      properties:
+        lockId: { type: string, format: uuid }
+        transactionId: { type: string }
+        baseCurrency: { type: string }
+        quoteCurrency: { type: string }
+        lockedRate: { type: number, format: decimal }
+        amount: { type: number, format: decimal }
+        status: { type: string, enum: [ACTIVE, CONSUMED, RELEASED, EXPIRED] }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        error: { type: string }
+        code:
+          type: string
+          enum:
+            - UNSUPPORTED_CURRENCY_PAIR
+            - RATE_LOCK_NOT_FOUND
+            - RATE_LOCK_NOT_ACTIVE
+            - RATE_LOCK_CONFLICT
+            - VALIDATION_FAILED
+            - INTERNAL_ERROR
+        message: { type: string }
+        path: { type: string }
+
+  responses:
+    ValidationError:
+      description: Request failed bean validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    UnsupportedPair:
+      description: No rate currently cached for this pair
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    LockNotFound:
+      description: No rate lock with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    LockNotActive:
+      description: Lock is CONSUMED (can't release) or otherwise not ACTIVE when an ACTIVE-only transition was requested
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLockConflict:
+      description: A lock already exists for this transactionId, or the per-pair lock-creation mutex could not be acquired after retries
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
