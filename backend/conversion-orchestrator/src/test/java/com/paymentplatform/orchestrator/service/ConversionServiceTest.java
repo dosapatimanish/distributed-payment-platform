@@ -15,6 +15,7 @@ import com.paymentplatform.orchestrator.exception.ConversionNotFoundException;
 import com.paymentplatform.orchestrator.repository.ConversionTransactionRepository;
 import com.paymentplatform.orchestrator.repository.SagaStepLogRepository;
 import com.paymentplatform.orchestrator.web.ConversionRequest;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -64,13 +65,15 @@ class ConversionServiceTest {
     @Mock
     private LedgerServiceClient ledgerClient;
 
+    private SimpleMeterRegistry meterRegistry;
     private ConversionService conversionService;
 
     @BeforeEach
     void setUp() {
+        meterRegistry = new SimpleMeterRegistry();
         conversionService = new ConversionService(
                 transactionRepository, stepLogRepository, walletClient, fxRateClient, merchantPaymentClient,
-                ledgerClient, "SYSTEM-FX-CLEARING");
+                ledgerClient, "SYSTEM-FX-CLEARING", meterRegistry);
         // save() just needs to hand back what it was given, like every other service's tests.
         // lenient: getConversion tests never call save() at all.
         lenient().when(transactionRepository.save(any(ConversionTransaction.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -120,6 +123,11 @@ class ConversionServiceTest {
         assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
         assertThat(entries.get(2)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.DEBIT, new BigDecimal("8300.0000"), "INR", BigDecimal.ZERO));
         assertThat(entries.get(3)).isEqualTo(new LedgerLineRequest("dst-wallet", LedgerEntryType.CREDIT, new BigDecimal("8300.0000"), "INR", new BigDecimal("8300.00")));
+
+        // design doc 5.4's "saga state" dashboard metric - one increment per transition actually
+        // taken on this run: RATE_LOCKED, SOURCE_DEBITED, DEST_CREDITED, COMPLETED.
+        assertThat(meterRegistry.counter("saga.state.transitions", "state", "COMPLETED").count()).isEqualTo(1.0);
+        assertThat(meterRegistry.counter("saga.state.transitions", "state", "DEST_CREDITED").count()).isEqualTo(1.0);
     }
 
     @Test

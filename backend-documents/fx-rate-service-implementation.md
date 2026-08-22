@@ -82,6 +82,13 @@ failure (unsupported pair, or the mutex/unique-constraint conflict), both keyed 
 Same shared Kafka broker as wallet-service (`backend/docker-compose.yml`'s `kafka` service),
 same direct-publish-no-outbox simplification and its accepted gap (see kafka-events.md).
 
+## Observability
+
+See [observability.md](observability.md) for the full concept writeup. This service's own
+contribution: `fxrate_lock_wait_time_seconds`, a Micrometer timer (client-side p50/p95/p99)
+wrapping `doLockRate`'s mutex-acquisition retry loop + critical section (design doc §5.4's
+"lock-wait time" NFR metric).
+
 ## Automated tests
 
 Unit tests only for this pass (same scope decision as wallet-service): 51 tests total, all

@@ -17,6 +17,7 @@ import com.paymentplatform.wallet.event.WalletDebitedEvent;
 import com.paymentplatform.wallet.event.WalletEventPublisher;
 import com.paymentplatform.wallet.repository.WalletReservationRepository;
 import com.paymentplatform.wallet.repository.WalletRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -62,16 +63,19 @@ public class WalletService {
     private final WalletEventPublisher eventPublisher;
     private final TransactionTemplate transactionTemplate;
     private final Duration reservationTtl;
+    private final MeterRegistry meterRegistry;
 
     public WalletService(WalletRepository walletRepository,
                           WalletReservationRepository reservationRepository,
                           WalletEventPublisher eventPublisher,
                           PlatformTransactionManager transactionManager,
-                          @Value("${wallet.reservation.ttl-minutes}") long reservationTtlMinutes) {
+                          @Value("${wallet.reservation.ttl-minutes}") long reservationTtlMinutes,
+                          MeterRegistry meterRegistry) {
         this.walletRepository = walletRepository;
         this.reservationRepository = reservationRepository;
         this.eventPublisher = eventPublisher;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.meterRegistry = meterRegistry;
         // Force a brand-new transaction on every call, regardless of what the caller is doing -
         // this is what lets each optimistic-retry attempt start with a clean persistence context.
         this.transactionTemplate.setPropagationBehavior(
@@ -222,6 +226,9 @@ public class WalletService {
                     return walletRepository.save(mutation.apply(wallet));
                 });
             } catch (ObjectOptimisticLockingFailureException ex) {
+                // design doc 5.4's "optimistic-lock retry rate" NFR metric - one increment per
+                // lost race, regardless of whether this attempt goes on to retry or exhausts.
+                meterRegistry.counter("wallet.optimistic.lock.retries").increment();
                 if (attempt >= MAX_OPTIMISTIC_ATTEMPTS) {
                     throw new WalletConflictException(walletId, attempt);
                 }

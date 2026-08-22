@@ -14,6 +14,7 @@ import com.paymentplatform.wallet.exception.WalletNotFoundException;
 import com.paymentplatform.wallet.event.WalletEventPublisher;
 import com.paymentplatform.wallet.repository.WalletReservationRepository;
 import com.paymentplatform.wallet.repository.WalletRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -67,6 +68,7 @@ class WalletServiceTest {
     @Mock
     private WalletEventPublisher eventPublisher;
 
+    private SimpleMeterRegistry meterRegistry;
     private WalletService walletService;
 
     @BeforeEach
@@ -77,8 +79,10 @@ class WalletServiceTest {
         // this stub as "unnecessary" for those.
         lenient().when(transactionManager.getTransaction(any(TransactionDefinition.class)))
                 .thenReturn(mock(TransactionStatus.class));
+        meterRegistry = new SimpleMeterRegistry();
         walletService = new WalletService(
-                walletRepository, reservationRepository, eventPublisher, transactionManager, RESERVATION_TTL_MINUTES);
+                walletRepository, reservationRepository, eventPublisher, transactionManager, RESERVATION_TTL_MINUTES,
+                meterRegistry);
     }
 
     private Wallet activeWallet(String walletId, BigDecimal balance, boolean highContention) {
@@ -280,6 +284,8 @@ class WalletServiceTest {
 
         assertThat(result.getBalance()).isEqualByComparingTo("90.0000");
         verify(walletRepository, times(3)).save(any(Wallet.class));
+        // design doc 5.4's optimistic-lock retry rate metric - one increment per lost race (2 here).
+        assertThat(meterRegistry.counter("wallet.optimistic.lock.retries").count()).isEqualTo(2.0);
     }
 
     @Test

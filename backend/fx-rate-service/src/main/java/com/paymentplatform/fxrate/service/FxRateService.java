@@ -10,6 +10,8 @@ import com.paymentplatform.fxrate.exception.RateLockNotActiveException;
 import com.paymentplatform.fxrate.exception.RateLockNotFoundException;
 import com.paymentplatform.fxrate.exception.UnsupportedCurrencyPairException;
 import com.paymentplatform.fxrate.repository.FxRateLockRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -38,15 +40,18 @@ public class FxRateService {
     private final FxRateLockRepository lockRepository;
     private final FxRateEventPublisher eventPublisher;
     private final Duration lockTtl;
+    private final MeterRegistry meterRegistry;
 
     public FxRateService(FxRateCache cache, DistributedLockManager lockManager,
                           FxRateLockRepository lockRepository, FxRateEventPublisher eventPublisher,
-                          @Value("${fx.rate.lock.ttl-seconds}") long lockTtlSeconds) {
+                          @Value("${fx.rate.lock.ttl-seconds}") long lockTtlSeconds,
+                          MeterRegistry meterRegistry) {
         this.cache = cache;
         this.lockManager = lockManager;
         this.lockRepository = lockRepository;
         this.eventPublisher = eventPublisher;
         this.lockTtl = Duration.ofSeconds(lockTtlSeconds);
+        this.meterRegistry = meterRegistry;
     }
 
     public FxRateCache.RateSnapshot getCurrentRate(String base, String quote) {
@@ -64,6 +69,10 @@ public class FxRateService {
      * against each other, not to gate how long the resulting business-level lock is valid.
      */
     public FxRateLock lockRate(String transactionId, String base, String quote, BigDecimal amount) {
+        // design doc 5.4's "lock-wait time" NFR metric - the full time to acquire the
+        // lock-creation mutex (see doLockRate) and use it, including any retry backoff spent
+        // waiting for a busy pair. Recorded on both outcomes, not just success.
+        Timer.Sample sample = Timer.start(meterRegistry);
         try {
             FxRateLock lock = doLockRate(transactionId, base, quote, amount);
             eventPublisher.publishRateLocked(new RateLockedEvent(
@@ -73,6 +82,8 @@ public class FxRateService {
             eventPublisher.publishRateLockFailed(
                     new RateLockFailedEvent(transactionId, base, quote, amount, ex.getMessage(), Instant.now()));
             throw ex;
+        } finally {
+            sample.stop(meterRegistry.timer("fxrate.lock.wait.time"));
         }
     }
 

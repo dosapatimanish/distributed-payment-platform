@@ -18,6 +18,7 @@ import com.paymentplatform.orchestrator.repository.ConversionTransactionReposito
 import com.paymentplatform.orchestrator.repository.SagaStepLogRepository;
 import com.paymentplatform.orchestrator.saga.SagaStateMachine;
 import com.paymentplatform.orchestrator.web.ConversionRequest;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -67,6 +68,7 @@ public class ConversionService {
     private final MerchantPaymentServiceClient merchantPaymentClient;
     private final LedgerServiceClient ledgerClient;
     private final String clearingAccountId;
+    private final MeterRegistry meterRegistry;
 
     public ConversionService(ConversionTransactionRepository transactionRepository,
                               SagaStepLogRepository stepLogRepository,
@@ -74,7 +76,8 @@ public class ConversionService {
                               FxRateServiceClient fxRateClient,
                               MerchantPaymentServiceClient merchantPaymentClient,
                               LedgerServiceClient ledgerClient,
-                              @Value("${orchestrator.ledger.clearing-account-id}") String clearingAccountId) {
+                              @Value("${orchestrator.ledger.clearing-account-id}") String clearingAccountId,
+                              MeterRegistry meterRegistry) {
         this.transactionRepository = transactionRepository;
         this.stepLogRepository = stepLogRepository;
         this.walletClient = walletClient;
@@ -82,6 +85,7 @@ public class ConversionService {
         this.merchantPaymentClient = merchantPaymentClient;
         this.ledgerClient = ledgerClient;
         this.clearingAccountId = clearingAccountId;
+        this.meterRegistry = meterRegistry;
     }
 
     public ConversionTransaction getConversion(String transactionId) {
@@ -351,6 +355,9 @@ public class ConversionService {
     private ConversionTransaction transition(ConversionTransaction txn, SagaState next) {
         SagaStateMachine.transition(txn.getSagaState(), next);
         txn.setSagaState(next);
+        // design doc 5.4's "saga state" dashboard - the single choke-point every state change in
+        // this service goes through, so one increment here covers the whole state machine.
+        meterRegistry.counter("saga.state.transitions", "state", next.name()).increment();
         return transactionRepository.save(txn);
     }
 

@@ -8,6 +8,7 @@ import com.paymentplatform.fxrate.exception.RateLockNotActiveException;
 import com.paymentplatform.fxrate.exception.RateLockNotFoundException;
 import com.paymentplatform.fxrate.exception.UnsupportedCurrencyPairException;
 import com.paymentplatform.fxrate.repository.FxRateLockRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -44,12 +45,15 @@ class FxRateServiceTest {
     private FxRateEventPublisher eventPublisher;
 
     private FxRateCache cache;
+    private SimpleMeterRegistry meterRegistry;
     private FxRateService fxRateService;
 
     @BeforeEach
     void setUp() {
         cache = new FxRateCache();
-        fxRateService = new FxRateService(cache, new DistributedLockManager(), lockRepository, eventPublisher, LOCK_TTL_SECONDS);
+        meterRegistry = new SimpleMeterRegistry();
+        fxRateService = new FxRateService(cache, new DistributedLockManager(), lockRepository, eventPublisher,
+                LOCK_TTL_SECONDS, meterRegistry);
     }
 
     private void seedRate(String base, String quote, String rate) {
@@ -91,6 +95,8 @@ class FxRateServiceTest {
         assertThat(lock.getLockedRate()).isEqualByComparingTo("83.0000");
         assertThat(lock.getTransactionId()).isEqualTo("txn-1");
         assertThat(lock.getExpiresAt()).isAfter(Instant.now());
+        // design doc 5.4's lock-wait time metric - recorded on this (successful) outcome too.
+        assertThat(meterRegistry.timer("fxrate.lock.wait.time").count()).isEqualTo(1);
     }
 
     @Test

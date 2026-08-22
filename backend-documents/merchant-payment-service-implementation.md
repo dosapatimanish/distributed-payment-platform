@@ -168,8 +168,14 @@ All done manually via `curl` against real Postgres, Redis, and Kafka:
   See conversion-orchestrator-implementation.md's "What this step built" (second pass) and its
   "Two real bugs this second pass caught" for the full story, including two genuine bugs the
   wiring surfaced.
-- Ledger Service, to record the double-entry ledger lines the full convert-and-pay flow (design
-  doc §5.3) will eventually need.
+- ~~Ledger Service~~ — **Done**, standalone and wired into the saga - see
+  ledger-service-implementation.md and conversion-orchestrator-implementation.md's "Third pass".
+  This service's own charge/refund amounts aren't separately ledgered yet (only the underlying
+  currency conversion is) - see that section's "What's deliberately not captured yet".
+- ~~Grafana + Prometheus observability~~ — **Done**, across all five services at once. This
+  service gets the default HTTP/JVM metrics (no custom instrumentation of its own, unlike
+  wallet-service/fx-rate-service/conversion-orchestrator) - see
+  [observability.md](observability.md).
 - Configurable refund failure in the mock acquirer — `refund` now has its first real caller
   (conversion-orchestrator's compensation path), so a deterministic refund-failure hook (same
   idea as `charge`'s decline-merchant-id) is a natural next addition to actually exercise that
