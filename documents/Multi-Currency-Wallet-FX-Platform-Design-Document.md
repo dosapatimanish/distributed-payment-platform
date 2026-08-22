@@ -252,7 +252,7 @@ Customer          Orchestrator        FX Rate Svc      Wallet Svc      Payment S
 
 | Layer | Technology | Usage in this Platform |
 |---|---|---|
-| Languages | Java, TypeScript, SQL | Java 17 + Spring Boot for all backend services; TypeScript/React for customer and ops UI; SQL/PL-SQL for Oracle schema and stored logic. |
+| Languages | Java, TypeScript, SQL | Java 25 + Spring Boot for all backend services; TypeScript/React for customer and ops UI; SQL/PL-SQL for Oracle schema and stored logic. |
 | Backend Framework | Spring Boot, Spring Security (OAuth2/JWT), Hibernate/JPA | REST controllers, service layer, JPA entities with `@Version` optimistic locking and `@Lock` pessimistic locking, JWT resource-server validation on every service. |
 | Service Communication | REST (sync commands), Apache Kafka (async events) | Orchestrator issues synchronous commands to Wallet/FX/Payment; those services publish completion/failure events asynchronously on Kafka for durability and decoupling. |
 | API Gateway | Spring Cloud Gateway | Central entry point, JWT pre-validation, routing, rate limiting. |
