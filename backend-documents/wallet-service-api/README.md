@@ -1,6 +1,8 @@
 # Wallet Service — API Docs
 
-7 endpoints, base URL `http://localhost:8081`, all under `/api/v1/wallets`.
+7 endpoints, base URL `http://localhost:8081`, all under `/api/v1/wallets`. Every endpoint
+except `getBalance` (read-only) requires an `Idempotency-Key` header — see
+[01-create-wallet.md](01-create-wallet.md)'s Features for the mechanics.
 
 | # | Method | Path | Doc |
 |---|---|---|---|

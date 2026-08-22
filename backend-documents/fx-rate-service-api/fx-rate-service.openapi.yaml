@@ -37,6 +37,8 @@ paths:
       tags: [Rate Locks]
       operationId: lockRate
       summary: Lock the current rate for a transaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -45,7 +47,9 @@ paths:
             example: { baseCurrency: "USD", quoteCurrency: "INR", amount: 100.00, transactionId: "txn-fx-001" }
       responses:
         "201":
-          description: Rate lock created (ACTIVE)
+          description: >
+            Rate lock created (ACTIVE), or (on a retried call with the same Idempotency-Key)
+            the original lock replayed unchanged.
           headers:
             Location: { schema: { type: string }, description: "/api/v1/fx/rate-lock/{lockId}" }
           content:
@@ -62,12 +66,16 @@ paths:
       summary: Mark a rate lock as consumed (the locked rate was actually used)
       parameters:
         - $ref: '#/components/parameters/LockId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "200":
-          description: Lock after consuming (CONSUMED)
+          description: >
+            Lock after consuming (CONSUMED), or (on a retried call with the same
+            Idempotency-Key) the original CONSUMED result replayed unchanged.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RateLockResponse' }
+        "400": { $ref: '#/components/responses/ValidationError' }
         "404": { $ref: '#/components/responses/LockNotFound' }
         "409": { $ref: '#/components/responses/LockNotActive' }
 
@@ -106,6 +114,15 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key identifying one logical attempt at this operation (design doc
+        §6.2.3). A retried/duplicated request with the same key replays the first attempt's
+        exact response instead of re-running it. Missing header → 400.
+      schema: { type: string }
 
   schemas:
     RateResponse:
@@ -153,6 +170,7 @@ components:
             - RATE_LOCK_NOT_ACTIVE
             - RATE_LOCK_CONFLICT
             - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_IN_PROGRESS
             - INTERNAL_ERROR
         message: { type: string }
         path: { type: string }
@@ -174,12 +192,17 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     LockNotActive:
-      description: Lock is CONSUMED (can't release) or otherwise not ACTIVE when an ACTIVE-only transition was requested
+      description: >
+        Lock is CONSUMED (can't release) or otherwise not ACTIVE when an ACTIVE-only transition
+        was requested, or (on consumeLock) this Idempotency-Key is still in progress
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     RateLockConflict:
-      description: A lock already exists for this transactionId, or the per-pair lock-creation mutex could not be acquired after retries
+      description: >
+        A lock already exists for this transactionId, the per-pair lock-creation mutex could
+        not be acquired after retries, or this Idempotency-Key is still in progress (poll
+        instead of resubmitting)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }

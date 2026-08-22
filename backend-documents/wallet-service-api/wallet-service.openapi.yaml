@@ -22,6 +22,8 @@ paths:
       tags: [Wallets]
       operationId: createWallet
       summary: Create a wallet
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -30,14 +32,20 @@ paths:
             example: { userId: "user-123", currency: "USD", highContention: false }
       responses:
         "201":
-          description: Wallet created
+          description: >
+            Wallet created, or (on a retried call with the same Idempotency-Key) the original
+            wallet replayed unchanged.
           headers:
             Location: { schema: { type: string }, description: "/api/v1/wallets/{walletId}" }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WalletResponse' }
         "400": { $ref: '#/components/responses/ValidationError' }
-        "409": { $ref: '#/components/responses/DuplicateWallet' }
+        "409":
+          description: Duplicate wallet for this (userId, currency), or this Idempotency-Key is still in progress
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /api/v1/wallets/{walletId}/balance:
     get:
@@ -61,6 +69,7 @@ paths:
       summary: Debit a wallet (immediate, no hold)
       parameters:
         - $ref: '#/components/parameters/WalletId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -85,6 +94,7 @@ paths:
       summary: Credit a wallet
       parameters:
         - $ref: '#/components/parameters/WalletId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -108,6 +118,7 @@ paths:
       summary: Place a hold against a wallet's balance
       parameters:
         - $ref: '#/components/parameters/WalletId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -132,6 +143,7 @@ paths:
       summary: Capture a held reservation (performs the real debit)
       parameters:
         - $ref: '#/components/parameters/ReservationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "200":
           description: Wallet after the debit
@@ -149,6 +161,7 @@ paths:
       summary: Release a held reservation (frees the hold, no balance change)
       parameters:
         - $ref: '#/components/parameters/ReservationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "200":
           description: Wallet (unchanged balance)
@@ -170,6 +183,15 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key identifying one logical attempt at this operation (design doc
+        §6.2.3). A retried/duplicated request with the same key replays the first attempt's
+        exact response instead of re-running the mutation. Missing header → 400.
+      schema: { type: string }
 
   schemas:
     CreateWalletRequest:
@@ -251,6 +273,7 @@ components:
             - WALLET_LOCK_TIMEOUT
             - DATA_CONFLICT
             - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_IN_PROGRESS
             - INTERNAL_ERROR
         message: { type: string }
         path: { type: string }
@@ -284,7 +307,8 @@ components:
     Conflict:
       description: >
         Wallet not in a valid state for this operation, reservation already
-        captured/released, optimistic-lock retries exhausted, or a pessimistic-lock timeout.
+        captured/released, optimistic-lock retries exhausted, a pessimistic-lock timeout, or
+        this Idempotency-Key is still in progress (poll instead of resubmitting).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }

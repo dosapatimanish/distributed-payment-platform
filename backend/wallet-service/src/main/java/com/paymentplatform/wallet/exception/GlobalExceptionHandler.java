@@ -1,5 +1,6 @@
 package com.paymentplatform.wallet.exception;
 
+import com.paymentplatform.wallet.idempotency.IdempotencyKeyInProgressException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -76,6 +78,16 @@ public class GlobalExceptionHandler {
                 .reduce((a, b) -> a + "; " + b)
                 .orElse("Validation failed");
         return build(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", message, req);
+    }
+
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException ex, HttpServletRequest req) {
+        return build(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler(IdempotencyKeyInProgressException.class)
+    public ResponseEntity<ErrorResponse> handleIdempotencyInProgress(IdempotencyKeyInProgressException ex, HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_IN_PROGRESS", ex.getMessage(), req);
     }
 
     @ExceptionHandler(Exception.class)

@@ -10,6 +10,8 @@ one fixed rate for its whole lifetime, immune to the feed refreshing underneath 
 
 ## Request
 
+Header: `Idempotency-Key` (required) — see Features.
+
 ```json
 {
   "baseCurrency": "USD",
@@ -50,24 +52,26 @@ Header `Location: /api/v1/fx/rate-lock/{lockId}`
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | bad currency code length, non-positive `amount`, blank `transactionId` |
+| 400 | `VALIDATION_FAILED` | missing `Idempotency-Key` header, bad currency code length, non-positive `amount`, blank `transactionId` |
 | 404 | `UNSUPPORTED_CURRENCY_PAIR` | no current rate cached for this pair |
-| 409 | `RATE_LOCK_CONFLICT` | a lock already exists for this `transactionId` (retried/duplicate call), or the per-pair lock-creation mutex couldn't be acquired after 3 attempts |
+| 409 | `RATE_LOCK_CONFLICT` | a lock already exists for this `transactionId` (a duplicate call with a *different* `Idempotency-Key`), the per-pair lock-creation mutex couldn't be acquired after 3 attempts, or this `Idempotency-Key` is still in progress |
 
 ## Flow (file by file)
 
-1. [FxRateController.lockRate](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/web/FxRateController.java) — binds `RateLockRequest`.
-2. [FxRateService.lockRate](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/service/FxRateService.java):
+1. [FxRateController.lockRate](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/web/FxRateController.java) — `@RequestHeader("Idempotency-Key")` (required) + binds `RateLockRequest`.
+2. [IdempotencyGuard.runIdempotent](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/idempotency/IdempotencyGuard.java) — a completed key short-circuits to the cached `RateLockResponse`, skipping every step below.
+3. [FxRateService.lockRate](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/service/FxRateService.java):
    - `DistributedLockManager.acquireLock(pairKey, 5s lease)` — a short mutex keyed by `base/quote`, held only for this method's own critical section (read the rate, build the row, save it), not for the lock's full 10s business TTL. Retries up to 3 times with a tiny backoff if the mutex is momentarily busy, else throws `RateLockConflictException`.
    - inside the mutex: `getCurrentRate` reads the cache, builds a new `FxRateLock` (`ACTIVE`, `expiresAt = now + ttl`).
    - `lockRepository.save(lock)` — the `transaction_id` UNIQUE constraint catches a duplicate/retried request for the same transaction; caught as `DataIntegrityViolationException`, rethrown as `RateLockConflictException`.
    - mutex released in a `finally` regardless of outcome.
-3. [DistributedLockManager](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/service/DistributedLockManager.java) — in-memory placeholder for the design doc's Redisson `RLock`; same method contract, so a real distributed lock drops in later without touching `FxRateService`.
-4. [FxRateLockRepository](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/repository/FxRateLockRepository.java) — plain `save`.
-5. `RateLockResponse.from(lock)`.
+4. [DistributedLockManager](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/service/DistributedLockManager.java) — in-memory placeholder for the design doc's Redisson `RLock`; same method contract, so a real distributed lock drops in later without touching `FxRateService`.
+5. [FxRateLockRepository](../../backend/fx-rate-service/src/main/java/com/paymentplatform/fxrate/repository/FxRateLockRepository.java) — plain `save`.
+6. `RateLockResponse.from(lock)`. On success, `IdempotencyGuard` caches this response; on failure, it releases the key.
 
 ## Features
 
 - **Mutex protects lock-*creation*, not the lock's lifetime**: contrast with the wallet's pessimistic `SELECT ... FOR UPDATE`, which is held for an entire mutation. Here the per-pair mutex is released the instant the `fx_rate_lock` row is written — the 10s TTL that follows is enforced purely by `expiresAt`, no lock held.
 - **One active lock per transaction**: the DB unique constraint on `transaction_id`, not just an app-level check — a genuinely concurrent duplicate request still can't create two locks for the same transaction.
 - **Fail-fast on contention**: 3 bounded attempts, then a 409 telling the caller to retry the whole request — same philosophy as wallet-service's `WalletConflictException`.
+- **`Idempotency-Key` fixes what the unique constraint alone can't**: the `transaction_id` constraint stops a duplicate from creating a *second* lock, but a plain retry with no key still hits that constraint as an *error* (`RATE_LOCK_CONFLICT`), not a replay. `Idempotency-Key` turns a legitimate retry into the original success response instead — same `lockId` and `lockedRate` back, not a 409. See [idempotency.md](../idempotency.md) for the full what/why/how (same mechanism on every write endpoint in both services; this service's `IdempotencyGuard` is a deliberate copy of wallet-service's).

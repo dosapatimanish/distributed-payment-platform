@@ -1,6 +1,8 @@
 # FX Rate Service — API Docs
 
-4 endpoints, base URL `http://localhost:8082`, all under `/api/v1/fx`.
+4 endpoints, base URL `http://localhost:8082`, all under `/api/v1/fx`. `lockRate` and
+`consumeLock` require an `Idempotency-Key` header; `getCurrentRate` (read-only) and `releaseLock`
+(already idempotent by design) don't — see [02-lock-rate.md](02-lock-rate.md)'s Features.
 
 | # | Method | Path | Doc |
 |---|---|---|---|
