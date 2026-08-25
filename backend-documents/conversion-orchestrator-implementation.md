@@ -74,8 +74,8 @@ way is a clean, well-defined follow-up (see What's next) rather than a rewrite.
 | Crash-recovery / saga resume | If this process dies mid-saga, `conversion_transaction`/`saga_step_log` accurately record where it stopped, but nothing automatically resumes it on restart. Needs the async architecture above — a listener re-entering the flow from persisted state — to do properly. |
 | Automatic retry of a failed compensation step | If reversing a debit/credit or releasing a lock itself fails during compensation, the saga is left stuck one or more states short of `COMPENSATED` rather than retried automatically. Logged at ERROR level - this is the one failure mode that can actually leave money in the wrong place if nobody follows up. |
 | Transactional Outbox | Same category as the other services' deferred Outbox - not built until something needs reliable delivery of *this* service's own events (it doesn't publish any yet). |
-| Testcontainers integration tests | Same scope decision as the other services - unit tests only for this pass, see Automated tests below. |
-| Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as the other services - and, per one of the bugs below, the thing that made one of them possible in the first place. |
+| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `ConversionTransactionRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for the `Persistable` bug below. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). Also closes Bug 1 below for good - a stale `CHECK` constraint from `ddl-auto=update` growing an enum is exactly the class of problem a real migration tool exists to prevent. |
 
 ## Package layout
 
@@ -302,8 +302,8 @@ happy-path and compensation alike — so one instrumentation point covers the wh
 
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as the other services): 65 tests total, all
-passing (`./mvnw test`).
+68 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
+Testcontainers integration test class against a real Postgres for the persistence layer.
 
 - **`SagaStateMachineTest`** (39 tests) — pure logic, no mocks, no Spring context. Every valid
   transition in the happy path (with and without a merchant charge) and both/all three
@@ -325,6 +325,11 @@ passing (`./mvnw test`).
   `ConversionService` and `IdempotencyGuard` both mocked with `@MockitoBean`, same passthrough-
   stub pattern as the other services' controller tests.
 - **`IdempotencyGuardTest`** (7 tests) — identical structure to the other services' own.
+- **`ConversionTransactionRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6:
+  a real `postgres:16-alpine` Testcontainers container, Flyway-migrated. The direct regression
+  test for the original `Persistable`/merge-vs-persist bug (see above) - `save()`'s returned
+  instance has `createdAt`/`updatedAt` populated; also `uk_conversion_transaction_idempotency_key`
+  really enforced, `sagaState` round-trip.
 
 ## Schema notes
 
@@ -419,10 +424,13 @@ only, see above):
 - A ledger posting for the merchant-charge "spend" step (see "What's deliberately not captured
   yet" above) - the platform-to-merchant money movement isn't in the ledger yet, only the
   underlying conversion is.
-- Testcontainers integration tests, including one that would have caught Bug 3 above for real
-  (a genuine Postgres column-length constraint, invisible to a mocked repository).
-- Testcontainers integration tests against real Postgres/Redis, plus (once async orchestration
-  exists) a real Kafka broker. Bug 2 above is exactly the kind of cross-service state
-  inconsistency a proper integration test - one that actually exercises fx-rate-service's real
-  `CONSUMED`-can't-be-released rule, not a mock of it - would have a chance of catching before
-  manual testing did.
+- ~~Testcontainers integration tests~~ — **Done for Postgres**:
+  `ConversionTransactionRepositoryIntegrationTest` (see testing-guide.md Pattern 6)
+  regression-tests the *original* `Persistable` bug this codebase learned from. Bug 3 was a
+  ledger-service schema bug, so its own regression test lives in ledger-service's
+  `LedgerEntryRepositoryIntegrationTest` instead. Still not covered by any Testcontainers test:
+  real Redis, and (once async orchestration exists) a real Kafka broker - and, notably, no
+  single-service Testcontainers test could have caught Bug 2 above anyway, since it's a
+  *cross-service* state-consistency bug (fx-rate-service's real `CONSUMED`-can't-be-released
+  rule interacting with this service's own retry logic) - only genuine multi-service testing
+  (what manual `curl` verification already did here) exercises that.

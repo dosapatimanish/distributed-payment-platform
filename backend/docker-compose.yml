@@ -106,9 +106,14 @@ services:
       retries: 5
 
   # Shared platform infra (design doc §6.5) - single-node KRaft mode (no Zookeeper needed),
-  # good enough for local dev. Both wallet-service and fx-rate-service publish to this broker;
-  # topics are auto-created on first publish (no explicit provisioning yet - see implementation
-  # notes' Kafka Events section for what's deferred).
+  # good enough for local dev. Topics are auto-created on first publish (no explicit provisioning
+  # yet - see implementation notes' Kafka Events section for what's deferred).
+  #
+  # Two PLAINTEXT listeners, not one, so both ways of running this platform keep working
+  # unchanged: PLAINTEXT_HOST (advertised as localhost:9092, host port 9092 - same as before)
+  # for services started on the host via `./mvnw spring-boot:run`; PLAINTEXT (advertised as
+  # kafka:29092, container-network only) for the containerized app services below, which can't
+  # reach "localhost:9092" from inside their own container - that would just mean themselves.
   kafka:
     image: apache/kafka:3.9.0
     container_name: platform-kafka
@@ -117,20 +122,132 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
 
-  # Observability (design doc 5.4) - scrapes /actuator/prometheus off every service, which run on
-  # the host (not their own containers - see each service's "How to run it locally"), so this
-  # container needs host.docker.internal. extra_hosts makes that resolve on Linux too, not just
-  # Docker Desktop (Windows/Mac already provide it built in - this entry is a no-op there).
+  # --- The 5 application services, containerized for one-command startup ---
+  # Each still runs equally well on the host via `./mvnw spring-boot:run` (see its own
+  # implementation notes) - these containers override the same properties via environment
+  # variables (Spring Boot's standard relaxed-binding env-var precedence), the application.
+  # properties files themselves are untouched. depends_on + condition: service_healthy on each
+  # service's own Postgres (and Redis) means a container won't even attempt to start before its
+  # datasource is actually ready to accept connections.
+  wallet-service:
+    build: ./wallet-service
+    container_name: wallet-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://wallet-postgres:5432/wallet_db
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      wallet-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  fx-rate-service:
+    build: ./fx-rate-service
+    container_name: fx-rate-service
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://fxrate-postgres:5432/fxrate_db
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      fxrate-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  merchant-payment-service:
+    build: ./merchant-payment-service
+    container_name: merchant-payment-service
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://payment-postgres:5432/payment_db
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      payment-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  ledger-service:
+    build: ./ledger-service
+    container_name: ledger-service
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_db
+      SPRING_DATA_REDIS_HOST: redis
+    depends_on:
+      ledger-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Started last (depends_on the other four app services, in addition to its own DB/Redis) -
+  # calls all four synchronously (design doc 5.3), so it's the one service where "does the
+  # thing it talks to already exist" actually matters at more than just startup-ordering
+  # cosmetics. condition: service_started (not service_healthy - none of the other four define
+  # an HTTP healthcheck) is still enough to avoid the worst of the race: without it, Compose
+  # would happily start all 5 app containers in parallel.
+  conversion-orchestrator:
+    build: ./conversion-orchestrator
+    container_name: conversion-orchestrator
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://orchestrator-postgres:5432/saga_db
+      SPRING_DATA_REDIS_HOST: redis
+      ORCHESTRATOR_WALLET_SERVICE_BASE_URL: http://wallet-service:8081
+      ORCHESTRATOR_FX_RATE_SERVICE_BASE_URL: http://fx-rate-service:8082
+      ORCHESTRATOR_MERCHANT_PAYMENT_SERVICE_BASE_URL: http://merchant-payment-service:8084
+      ORCHESTRATOR_LEDGER_SERVICE_BASE_URL: http://ledger-service:8085
+    depends_on:
+      orchestrator-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      wallet-service:
+        condition: service_started
+      fx-rate-service:
+        condition: service_started
+      merchant-payment-service:
+        condition: service_started
+      ledger-service:
+        condition: service_started
+
+  # Observability (design doc 5.4) - scrapes /actuator/prometheus off every service via
+  # host.docker.internal, which works whether a service is running as its own container above
+  # (reached via its published host port) or on the host directly via `./mvnw spring-boot:run`
+  # (see each service's "How to run it locally") - either way its port ends up bound on the host
+  # network, which is what host.docker.internal actually resolves to. extra_hosts makes that name
+  # resolve on Linux too, not just Docker Desktop (Windows/Mac already provide it built in - this
+  # entry is a no-op there).
   prometheus:
     image: prom/prometheus:v3.0.1
     container_name: platform-prometheus

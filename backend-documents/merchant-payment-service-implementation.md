@@ -30,8 +30,8 @@ The Merchant Payment Service, as a standalone Spring Boot 4.1.1 (Java 25) module
 | Resilience4j circuit breaker | Design doc §6.3.4 calls for one wrapping `AcquirerGatewayClient`. Wrapping a mock in a circuit breaker would be pure decoration - there is no real external dependency yet to actually protect against. Revisit once a real acquirer exists. |
 | Configurable refund failure | The mock's `refund()` always succeeds - only the primary charge needed a deterministic failure hook to exercise `payment.failed` and (eventually) the orchestrator's compensation path; a failing refund is a rarer edge case, not built yet. |
 | Transactional Outbox | Same category as the other three services' deferred Outbox. |
-| Testcontainers integration tests | Same scope decision as the other three services - unit tests only for this pass. |
-| Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as the other three services. |
+| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `MerchantPaymentRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). |
 
 ## Package layout
 
@@ -98,8 +98,8 @@ first try.
 
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as the other three services): 27 tests
-total, all passing (`./mvnw test`).
+30 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
+Testcontainers integration test class against a real Postgres for the persistence layer.
 
 - **`MerchantPaymentServiceTest`** (9 tests) — `MerchantPaymentRepository`,
   `AcquirerGatewayClient`, and `MerchantPaymentEventPublisher` all mocked. Covers both charge
@@ -115,6 +115,10 @@ total, all passing (`./mvnw test`).
 - **`IdempotencyGuardTest`** (7 tests) — identical structure to the other three services' own.
 - **`MerchantPaymentEventPublisherTest`** (3 tests) — identical structure to the other services'
   own event-publisher tests (Pattern 5 in testing-guide.md).
+- **`MerchantPaymentRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
+  `postgres:16-alpine` Testcontainers container, Flyway-migrated. Proves `createdAt`/`updatedAt`
+  populated on `save()`'s return, `uk_merchant_payment_transaction_id` really enforced, `status`
+  round-trip.
 
 ## Schema notes
 
@@ -180,4 +184,4 @@ All done manually via `curl` against real Postgres, Redis, and Kafka:
   (conversion-orchestrator's compensation path), so a deterministic refund-failure hook (same
   idea as `charge`'s decline-merchant-id) is a natural next addition to actually exercise that
   path, rather than a hypothetical one.
-- Testcontainers integration tests.
+- ~~Testcontainers integration tests~~ — **Done** (Postgres only, see Deferred table above).
