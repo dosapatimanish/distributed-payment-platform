@@ -7,26 +7,30 @@ actually in `WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`,
 `FxRateControllerTest`, `ConversionServiceTest`, `MerchantPaymentServiceTest`,
 `LedgerServiceTest`, etc.
 
-## Scope decision: unit tests only, for now
+## Scope decision: unit tests for logic, Testcontainers for the persistence layer
 
-All five services currently have **unit tests only** — no Testcontainers/real-Postgres/
-real-Redis/real-Kafka integration tests yet. Deliberate, not an oversight:
+All five services now have **two layers of automated test**, deliberately scoped differently:
 
-| | Unit tests (done) | Testcontainers integration tests (deferred) |
+| | Unit tests (Mockito) | Testcontainers integration tests (real Postgres) |
 |---|---|---|
-| Speed | ~2-6s per module | Much slower — spins up real Postgres/Redis/Kafka per run |
+| Speed | ~2-6s per module | ~7s per module (one real container, reused across that class's tests) |
 | Needs Docker at test time | No | Yes |
-| Proves | Business logic, validation, error mapping | The DB actually enforces `SELECT ... FOR UPDATE`, unique constraints, `@Version` conflicts under real concurrent load; Redis's `SETNX` race resolves correctly; Kafka actually persists/orders published events |
+| Proves | Business logic, validation, error mapping — the code's own decisions given assumed collaborator behavior | The migrated schema (Flyway's `V1__init.sql`) actually matches the entity mappings; unique/check constraints are real, not just declared; `save()` returns an instance with DB-computed fields populated |
 
-The unit tests below **simulate** this behavior (e.g. feeding a mocked repository a scripted
-sequence of `ObjectOptimisticLockingFailureException`s, or a mocked `KafkaTemplate` a
-pre-built `CompletableFuture`) rather than proving Postgres/Redis/Kafka themselves do what the
-code assumes. That gap is real and worth closing with an integration-test pass later — see each
-service's implementation-notes doc for the "what's next" entry. The Kafka half of this gap was
-partly closed *manually* (not by the automated suite) — see kafka-events.md's "Manually
-verified" section.
+The unit tests **simulate** DB behavior (e.g. feeding a mocked repository a scripted sequence of
+`ObjectOptimisticLockingFailureException`s) rather than proving Postgres itself does what the
+code assumes. Pattern 6 below closes that gap for the persistence layer specifically — one
+`@DataJpaTest` + real `PostgreSQLContainer` class per service, exercising each entity's own
+repository against a real, Flyway-migrated database.
 
-**A concrete case where this gap actually bit**: conversion-orchestrator's
+**Still deferred**: Redis's `SETNX` race and Kafka's actual publish/ordering behavior aren't
+covered by Testcontainers yet — `IdempotencyGuardTest` and the event-publisher tests still mock
+`StringRedisTemplate`/`KafkaTemplate` (Patterns 4 and 5 below), and the Kafka half of that gap
+was only closed *manually* (not by the automated suite) — see kafka-events.md's "Manually
+verified" section. A full Redis/Kafka Testcontainers pass is a clean, separate follow-up from
+this one.
+
+**A concrete case where this gap actually bit** (now closed): conversion-orchestrator's
 `ConversionServiceTest` mocks its repository's `save()` to return exactly what was passed in -
 faithful to what a mock *should* do, but not to what Hibernate's real `merge()` path actually
 does for an entity with a manually-assigned id and no `@Version` field (it returns a *different*
@@ -36,6 +40,17 @@ test suite passed the whole time; only a real-Postgres manual `curl` test caught
 conversion-orchestrator-implementation.md's "A real bug this caught: `Persistable` and
 manually-assigned entity IDs" for the full story and fix - worth reading before adding another
 entity with an application-assigned id anywhere in this codebase.
+`ConversionTransactionRepositoryIntegrationTest` (Pattern 6 below) now asserts exactly this
+against a real container, permanently - the exact test that would have caught the bug on day one
+had it existed then.
+
+**A second concrete case, caught *while writing* the Testcontainers pass itself** (not before
+it): ledger-service's `transaction_id` column being `VARCHAR(36)` originally caused a live
+`value too long` error the first time conversion-orchestrator tried to post a `-reversal`-suffixed
+id (45 chars) - see conversion-orchestrator-implementation.md's "Bug 3". Widened to `VARCHAR(64)`
+at the time, but there was no automated regression guard against it ever shrinking back until
+`LedgerEntryRepositoryIntegrationTest`'s `save_45CharReversalStyleTransactionId_fitsInTheColumn`
+test (Pattern 6 below) was added - a direct, permanent regression test for that exact bug.
 
 **A second, related case, from wiring merchant-payment-service into the same saga**: a test that
 mocks two different downstream clients (`FxRateServiceClient` and `WalletServiceClient`, say)
@@ -285,6 +300,74 @@ actually receives, persists, or orders these messages correctly. That was verifi
 manually against a real broker instead (see kafka-events.md) - still a Testcontainers-shaped
 gap in the automated suite, same category as the Postgres/Redis ones.
 
+## Pattern 6 — repository integration test against a real Postgres container
+
+```java
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Testcontainers
+class WalletRepositoryIntegrationTest {
+
+    @Container
+    @ServiceConnection
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+
+    @Autowired
+    private WalletRepository walletRepository;
+
+    @Test
+    void save_populatesCreatedAtAndUpdatedAt_onTheReturnedInstance() {
+        Wallet saved = walletRepository.save(new Wallet(...));
+
+        assertThat(saved.getCreatedAt()).isNotNull();
+        assertThat(saved.getUpdatedAt()).isNotNull();
+    }
+
+    @Test
+    void save_duplicateUserCurrency_violatesRealUniqueConstraint() {
+        walletRepository.saveAndFlush(new Wallet(..., "user-1", "EUR", ...));
+
+        assertThatThrownBy(() -> walletRepository.saveAndFlush(new Wallet(..., "user-1", "EUR", ...)))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+}
+```
+
+`@DataJpaTest` + `@AutoConfigureTestDatabase(replace = NONE)` + `@Testcontainers` +
+`@ServiceConnection` on a `@Container static PostgreSQLContainer` is the whole setup - Spring
+Boot wires the container's real JDBC URL into the test context automatically (no manual
+`@DynamicPropertySource` needed), Flyway's `V1__init.sql` runs against it at context startup
+exactly like production does, and `@AutoConfigureTestDatabase(replace = NONE)` stops
+`@DataJpaTest`'s default behavior of trying to swap in an embedded database this project doesn't
+have (no H2 anywhere on the classpath).
+
+**Every service gets exactly one of these**, one per its main entity's repository: `wallet-service`
+→ `WalletRepositoryIntegrationTest`, `fx-rate-service` → `FxRateLockRepositoryIntegrationTest`,
+`conversion-orchestrator` → `ConversionTransactionRepositoryIntegrationTest`,
+`merchant-payment-service` → `MerchantPaymentRepositoryIntegrationTest`, `ledger-service` →
+`LedgerEntryRepositoryIntegrationTest`. Each asserts the same three things, adapted to that
+entity: (1) `save()`'s returned instance has its `@PrePersist`-set timestamp field(s) populated -
+the direct regression test for the `Persistable`/merge-vs-persist bug class, worth having even on
+entities (like `Wallet`, which has `@Version`) that were never actually susceptible to it; (2) the
+entity's real unique/check constraint actually rejects a violation, not just declares one; (3) a
+plain `findById`/finder round-trip preserves precision/enum values correctly. `WalletServiceTest`
+never talks to a container at all - unit tests keep mocking the repository, this is a separate,
+additional test class, not a replacement.
+
+**Boot 4.1.1 / Testcontainers 2.x gotchas hit writing this pattern** (see wallet-service-
+implementation.md's own gotchas section for the fuller writeup of the first one):
+
+- `@DataJpaTest` lives at `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest`,
+  `@AutoConfigureTestDatabase` at `org.springframework.boot.jdbc.test.autoconfigure.*` - two
+  *different* granular test-starter artifacts (`spring-boot-starter-data-jpa-test` pulls both
+  in), not the pre-Boot-4 unified package.
+- Testcontainers 2.x renamed its Maven artifacts with a `testcontainers-` prefix
+  (`org.testcontainers:testcontainers-junit-jupiter`, `org.testcontainers:testcontainers-postgresql`
+  - not the classic bare `junit-jupiter`/`postgresql` artifact ids from 1.x) and moved
+  `PostgreSQLContainer` to `org.testcontainers.postgresql.PostgreSQLContainer`, which is no
+  longer generic (no more `PostgreSQLContainer<SELF>` self-typed builder pattern) - a plain
+  `PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine")`, no `<>`.
+
 ## Two mocking traps worth knowing before you hit them
 
 ### Trap 1 — `UnnecessaryStubbingException` from a shared `@BeforeEach` stub
@@ -394,11 +477,18 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | ledger-service | `LedgerServiceTest` | 4 | Repository mocked, real `DoubleEntryValidator` wired in - balanced posting, `LedgerConflictException` short-circuit, unbalanced posting never reaching `save`, `getStatement` delegation |
 | ledger-service | `LedgerControllerTest` | 7 | Request validation + HTTP/error-code mapping, both endpoints - incl. empty `entries`, `INVALID_LEDGER_ENTRIES`, `LEDGER_CONFLICT`, populated and empty statement |
 | ledger-service | `IdempotencyGuardTest` | 7 | Identical structure to the other services' own - fifth deliberate copy |
+| wallet-service | `WalletRepositoryIntegrationTest` | 3 | Pattern 6 - real Postgres container, Flyway-migrated. `createdAt`/`updatedAt` populated on `save()`'s return, `uk_wallet_user_currency` really enforced, `findById` precision round-trip |
+| fx-rate-service | `FxRateLockRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt` populated, `uk_fx_rate_lock_transaction_id` really enforced, `lockedRate` precision round-trip |
+| conversion-orchestrator | `ConversionTransactionRepositoryIntegrationTest` | 3 | Pattern 6 - the direct regression test for the original `Persistable`/merge-vs-persist bug (see above), `uk_conversion_transaction_idempotency_key` really enforced, `sagaState` round-trip |
+| merchant-payment-service | `MerchantPaymentRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt`/`updatedAt` populated, `uk_merchant_payment_transaction_id` really enforced, `status` round-trip |
+| ledger-service | `LedgerEntryRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt` populated, the direct regression test for Bug 3's `VARCHAR(64)` column width (see above), `findByWalletIdOrderByCreatedAtAsc` |
 
-**219 tests in this table** (221 total per `./mvnw test` across all five modules, including 2
+**234 tests in this table** (236 total per `./mvnw test` across all five modules, including 2
 pre-existing Spring-Initializr smoke tests not written as part of this work - wallet-service and
 fx-rate-service only, the other three modules were hand-scaffolded without one). Run per
-service: `cd backend/<service> && ./mvnw test`.
+service: `cd backend/<service> && ./mvnw test` - the 5 Pattern 6 integration tests need Docker
+running locally (Testcontainers spins up a real `postgres:16-alpine` container per test class);
+everything else runs with no external dependency at all.
 
 ## Checklist for testing the next service
 
@@ -429,6 +519,9 @@ service: `cd backend/<service> && ./mvnw test`.
    repository will ever catch this - only a real database will. Applied from the start in
    merchant-payment-service's `MerchantPayment` (same shape, same risk) - confirmed clean on the
    first manual `curl` test, no repeat of the bug.
-9. Testcontainers/real-Postgres/real-Redis/real-Kafka integration tests are still a deliberate
-   gap across all four existing services — worth deciding once, for whichever service takes it
-   on first, rather than re-deciding per service.
+9. Add a Pattern 6 repository integration test (real Postgres via Testcontainers) for the
+   service's main entity/repository — copy an existing one (they're all near-identical) and
+   adapt the entity, constructor, and the one real unique/check constraint it covers. Real
+   Redis/Kafka Testcontainers integration tests are still a deliberate gap across all five
+   services — worth deciding once, for whichever service takes it on first, rather than
+   re-deciding per service.

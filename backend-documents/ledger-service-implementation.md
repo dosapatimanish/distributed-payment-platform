@@ -29,8 +29,8 @@ by its own PostgreSQL database (`ledger_db`):
 | ~~Cross-currency double-entry netting~~ | **Done.** Resolved with a synthetic FX clearing account, not a validator change — see conversion-orchestrator-implementation.md's "Third pass" section for the full reasoning. `DoubleEntryValidator` itself needed no code changes at all. |
 | Kafka events | The design doc's topic table (§6.5) has no ledger-originated topic — this service is the sink other services' events eventually feed (indirectly, via the orchestrator calling it), not a publisher itself. No `spring-kafka` dependency pulled in at all for this service. |
 | Transactional Outbox | Same category as the other four services' deferred Outbox — moot here anyway since there's no event to publish (see above). |
-| Testcontainers integration tests | Same scope decision as the other four services — unit tests only for this pass. |
-| Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as the other four services. |
+| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `LedgerEntryRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for Bug 3's `VARCHAR(64)` column width. Real Redis/Kafka Testcontainers still deferred (this service has no Kafka producer anyway). |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). |
 | Pagination on `getStatement` | Every entry for a wallet is returned in one response — fine at this project's scale, would need cursor/offset pagination for a real high-volume wallet. |
 
 ## Package layout
@@ -91,8 +91,8 @@ on the very first `curl` response, first try.
 
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as the other four services): 24 tests total,
-all passing (`./mvnw test`).
+27 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
+Testcontainers integration test class against a real Postgres for the persistence layer.
 
 - **`DoubleEntryValidatorTest`** (6 tests) — pure unit tests, no mocks needed (same category as
   `SagaStateMachineTest` in testing-guide.md). Covers a balanced same-currency pair, an empty
@@ -109,6 +109,11 @@ all passing (`./mvnw test`).
   four services. Covers the happy path, missing header, empty `entries` (bean validation),
   `INVALID_LEDGER_ENTRIES`, `LEDGER_CONFLICT`, and both a populated and an empty statement.
 - **`IdempotencyGuardTest`** (7 tests) — identical structure to the other four services' own.
+- **`LedgerEntryRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
+  `postgres:16-alpine` Testcontainers container, Flyway-migrated. The direct regression test for
+  Bug 3's `VARCHAR(64)` column width - saves an entry under a real 45-char reversal-style
+  `transactionId` and confirms it round-trips intact; also `createdAt` populated on `save()`'s
+  return, `findByWalletIdOrderByCreatedAtAsc`.
 
 ## Schema notes
 
@@ -170,7 +175,8 @@ All done manually via `curl` against real Postgres and Redis:
   pay a merchant (post-charge, in conversion-orchestrator's `chargeMerchant`) isn't reflected in
   the ledger yet, only the underlying currency conversion is. See conversion-orchestrator-
   implementation.md's "What's deliberately not captured yet".
-- Testcontainers integration tests — would have caught Bug 3 above for real (a genuine column-
-  length constraint), where a mocked-repository unit test structurally cannot.
+- ~~Testcontainers integration tests — would have caught Bug 3 above for real~~ — **Done.**
+  `LedgerEntryRepositoryIntegrationTest`'s `save_45CharReversalStyleTransactionId_fitsInTheColumn`
+  is exactly that regression test now (see testing-guide.md's Pattern 6).
 - ~~Grafana + Prometheus observability~~ — **Done**, across all five services at once — see
   [observability.md](observability.md).

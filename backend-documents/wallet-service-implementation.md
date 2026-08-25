@@ -25,7 +25,8 @@ PostgreSQL persistence:
 | Transactional Outbox pattern | Only meaningful once there's a Kafka publish step to make reliable. |
 | Oracle | Postgres is free, Docker-friendly, and close enough in SQL/locking semantics (including `SELECT ... FOR UPDATE`) to develop against. The schema was kept Oracle-portable on purpose (see below) so the eventual migration is a config/dialect change, not a rewrite. |
 | ~~Automated tests~~ | **Done** — see [Automated tests](#automated-tests) below. Was explicit user request to defer for the initial build; verified manually with `curl` instead at the time. |
-| Flyway/Liquibase migrations | `spring.jpa.hibernate.ddl-auto=update` is fine while the schema is still moving during learning; must be replaced with real migrations once it stabilizes. |
+| ~~Flyway/Liquibase migrations~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. See Schema notes below. |
+| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `WalletRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
 
 ## Package layout
 
@@ -169,8 +170,9 @@ inferring it from log volume.
 
 ## Automated tests
 
-Unit tests only for this pass (no Testcontainers/real-DB/real-Redis/real-Kafka integration
-tests yet — that's a separate, larger follow-up): 54 tests total, all passing (`./mvnw test`).
+57 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
+Testcontainers integration test class against a real Postgres for the persistence layer (real
+Redis/Kafka Testcontainers still deferred — see testing-guide.md's "Scope decision").
 
 - **`WalletServiceTest`** (25 tests) — Mockito doubles for `WalletRepository`,
   `WalletReservationRepository`, `WalletEventPublisher`, and `PlatformTransactionManager`; no
@@ -198,6 +200,11 @@ tests yet — that's a separate, larger follow-up): 54 tests total, all passing 
   the expected payload fields, plus one test proving a failed/exceptional
   `CompletableFuture` from `kafkaTemplate.send(...)` never propagates out of the publisher (see
   kafka-events.md).
+- **`WalletRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
+  `postgres:16-alpine` Testcontainers container, Flyway's `V1__init.sql` migrating it at context
+  startup exactly like production. Proves `save()`'s returned instance has `createdAt`/
+  `updatedAt` populated, `uk_wallet_user_currency` is really enforced by Postgres (not just
+  declared on the entity), and a `findById` round-trip preserves `NUMERIC(18,4)` precision.
 
 **Mocking `PlatformTransactionManager`**: `WalletService` builds its own `TransactionTemplate`
 in the constructor (see the self-invocation section above) rather than using `@Transactional`,
@@ -230,6 +237,11 @@ retry attempt starts from the real committed state, the way a fresh `SELECT` wou
 - `WalletReservation.walletId` is a plain string FK column, not a JPA `@ManyToOne` — the target
   `Wallet` is always loaded explicitly by `WalletService`, through whichever locking strategy it
   chose, never implicitly through a lazy association.
+- Schema is now Flyway-owned: `db/migration/V1__init.sql` reproduces exactly what
+  `ddl-auto=update` had already generated (same tables/columns/indexes/constraints, not
+  redesigned), and `ddl-auto` is now `validate`. Verified by wiping both Postgres volumes and
+  Docker images and confirming Flyway builds the schema from empty and Hibernate validates
+  against it cleanly — see the Docker gotcha above for the one real bug this surfaced.
 
 ## Spring Boot 4.1.1 gotchas hit along the way
 
@@ -269,6 +281,19 @@ recorded here rather than left to be rediscovered:
   exactly the kind of mixed-major-version mess worth avoiding - `WalletEventPublisher` uses
   plain `StringSerializer` and does its own JSON encoding with the app's Jackson 3
   `ObjectMapper` instead (see kafka-events.md).
+- **Flyway autoconfiguration is a separate starter, not bundled with `flyway-core`.** Adding
+  `flyway-core` + `flyway-database-postgresql` alone compiles fine but Flyway never actually
+  runs at startup - no log line, no `flyway_schema_history` table, and Hibernate's
+  `ddl-auto=validate` then fails with "missing table" against an empty database, silently
+  (no Flyway error to explain why). The class that wires Flyway into Spring Boot's startup isn't
+  in `spring-boot-autoconfigure-4.1.1.jar` at all (confirmed by unzipping it and checking its
+  `AutoConfiguration.imports` file - same "unzip the actual jar" approach as the `@WebMvcTest`
+  package move above) - it's a dedicated `org.springframework.boot:spring-boot-starter-flyway`
+  artifact, found by grepping `spring-boot-dependencies`' own BOM for "flyway" and noticing a
+  `spring-boot-starter-flyway` entry instead of the classic bare `flyway-core` approach older
+  Boot versions used. Fixed by depending on that starter instead (it pulls in `flyway-core`
+  itself); `flyway-database-postgresql` is still needed alongside it for Postgres support
+  specifically (Flyway 10+ split per-database support out of `flyway-core`).
 
 ## How to run it locally
 
@@ -329,11 +354,11 @@ All done manually via `curl` (automated tests deferred, see above):
 
 ## What's next
 
-- Testcontainers integration tests against real Postgres, real Redis, and real Kafka, to
-  actually exercise `SELECT ... FOR UPDATE`, the DB unique constraints, the idempotency guard's
-  `SETNX` race, and partition-key ordering end-to-end (deliberately out of scope for this pass -
-  see Automated tests above).
+- ~~Testcontainers integration tests against real Postgres~~ — **Done**, for the unique
+  constraint and `Persistable`-shape assertions (see Automated tests above). Still deferred: a
+  real-Postgres test of `SELECT ... FOR UPDATE`/`@Version` conflicts under genuine concurrent
+  load, and real Redis (the idempotency guard's `SETNX` race) / real Kafka (partition-key
+  ordering) Testcontainers tests.
 - Transactional Outbox pattern, now that there's a Kafka publish step to make reliable (see
   kafka-events.md's "Deliberate simplification: no outbox, no delivery guarantee").
-- Flyway migrations, replacing `ddl-auto=update`, once the schema stabilizes.
 - Eventual Oracle migration (schema was kept portable for exactly this).

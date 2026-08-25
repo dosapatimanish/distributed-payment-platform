@@ -1,0 +1,7 @@
+# Force LF for shell scripts regardless of core.autocrlf - the Maven Wrapper scripts (mvnw) run
+# both on the host (Git Bash) and inside Linux Docker build stages (backend/*/Dockerfile). A
+# CRLF-terminated mvnw breaks with "not found" inside a Linux container (bad shebang line) - hit
+# for real building 4 of the 5 services' Docker images on Windows before this file existed.
+*.sh text eol=lf
+mvnw text eol=lf
+mvnw.cmd text eol=crlf

@@ -26,8 +26,8 @@ by its own PostgreSQL database (`fxrate_db`):
 | Real external FX rate provider | `RateRefreshScheduler` fakes a fluctuating rate instead — no API key/rate-limit/downtime handling to build against yet, and nothing downstream (Conversion Orchestrator) consumes real rates yet either. |
 | Expired-lock sweep | A lock past `expiresAt` is only marked `EXPIRED` lazily, the next time something tries to consume or release it — nothing proactively sweeps `ACTIVE` locks whose TTL has silently passed. Same gap as wallet-service's un-swept expired reservations. |
 | ~~Kafka `rate.locked` / `rate.lock.failed` events~~ | **Done** — see [Kafka Events](#kafka-events) below. |
-| Testcontainers integration tests | Same scope decision as wallet-service — unit tests only for this pass, see [Automated tests](#automated-tests) below. |
-| Flyway/Liquibase | `ddl-auto=update`, same deliberate temporary choice as wallet-service. |
+| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `FxRateLockRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section) - `flyway-core` alone doesn't wire Flyway into Spring Boot 4.1.1's startup at all. |
 
 ## Package layout
 
@@ -91,8 +91,8 @@ wrapping `doLockRate`'s mutex-acquisition retry loop + critical section (design 
 
 ## Automated tests
 
-Unit tests only for this pass (same scope decision as wallet-service): 51 tests total, all
-passing (`./mvnw test`).
+54 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
+Testcontainers integration test class against a real Postgres for the persistence layer.
 
 - **`FxRateCacheTest`** (3), **`DistributedLockManagerTest`** (5) — pure unit tests, no Spring,
   no mocks; both classes are simple in-memory collections so they're cheap to exercise directly,
@@ -120,6 +120,10 @@ passing (`./mvnw test`).
 - **`FxRateEventPublisherTest`** (3) — identical structure to wallet-service's own
   `WalletEventPublisherTest` (mocked `KafkaTemplate`, real `ObjectMapper`), since the two
   publisher classes are deliberate copies of each other.
+- **`FxRateLockRepositoryIntegrationTest`** (3) — testing-guide.md's Pattern 6: a real
+  `postgres:16-alpine` Testcontainers container, Flyway-migrated. Proves `createdAt` populated on
+  `save()`'s return, `uk_fx_rate_lock_transaction_id` really enforced, `lockedRate` precision
+  round-trip.
 
 ## Local run
 
