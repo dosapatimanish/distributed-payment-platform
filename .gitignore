@@ -4,6 +4,11 @@
 # Log file
 *.log
 
+# Application log output (hourly-rolled files written by logback-spring.xml)
+logs/
+**/logs/
+backend/logs/
+
 # BlueJ files
 *.ctxt
 

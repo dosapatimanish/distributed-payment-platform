@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging setup for this service.
+
+  Two appenders, both fed by the root logger: CONSOLE (unchanged dev experience) and FILE.
+
+  FILE is a rolling file whose live name is always logs/<app-name>.log. HourlyRolloverTriggeringPolicy
+  fires on the first log event of each new clock hour; FixedWindowRollingPolicy then shifts the
+  existing files up by one - <app>.log becomes <app>.log.1, the old <app>.log.1 becomes
+  <app>.log.2, ... up to index 168 (~7 days of hourly copies; anything older is dropped). Existing
+  files are never overwritten. So at any moment logs/<app>.log is the current hour and
+  logs/<app>.log.1 .. .log.N are progressively older whole hours.
+
+  LOG_DIR defaults to "logs" (relative to the process working directory); override with a LOG_DIR
+  env var or system property. The logs/ directory is git-ignored.
+
+  Per-logger levels (com.paymentplatform at DEBUG, etc.) live in application.properties.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="application"/>
+    <property name="LOG_DIR" value="${LOG_DIR:-logs}"/>
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{reqId:-}] %logger{36} - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <!-- .log -> .log.1 -> .log.2 ... integer-suffixed copies, newest is .1 -->
+            <fileNamePattern>${LOG_DIR}/${APP_NAME}.log.%i</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>168</maxIndex>
+        </rollingPolicy>
+        <triggeringPolicy class="com.paymentplatform.orchestrator.observability.HourlyRolloverTriggeringPolicy">
+            <!-- one file per clock hour; set LOG_ROLL_INTERVAL_SECONDS (env var / -D) lower to roll faster in a demo -->
+            <intervalSeconds>${LOG_ROLL_INTERVAL_SECONDS:-3600}</intervalSeconds>
+        </triggeringPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>
