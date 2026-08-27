@@ -18,10 +18,9 @@ import org.springframework.web.bind.annotation.RestController;
 import java.net.URI;
 
 /**
- * Every write endpoint requires an {@code Idempotency-Key} header (design doc 6.2.3) and routes
- * the actual mutation through {@link IdempotencyGuard#runIdempotent} - a retried/double-tapped
- * request with the same key replays the first attempt's result instead of running it again.
- * {@code getBalance} is read-only and does not need one.
+ * Every write endpoint requires an {@code Idempotency-Key} header (design doc §6.2.3) and routes
+ * the mutation through {@link IdempotencyGuard#runIdempotent}. {@code getBalance} is read-only.
+ * Path variable {@code accountNo} is the 12-char bank-style account number.
  */
 @RestController
 @RequestMapping("/api/v1/wallets")
@@ -39,42 +38,42 @@ public class WalletController {
     public ResponseEntity<WalletResponse> createWallet(@RequestHeader("Idempotency-Key") String idempotencyKey,
                                                          @Valid @RequestBody CreateWalletRequest request) {
         WalletResponse response = idempotencyGuard.runIdempotent(idempotencyKey, WalletResponse.class, () -> {
-            Wallet wallet = walletService.createWallet(request.userId(), request.currency(), request.highContention());
+            Wallet wallet = walletService.createWallet(request.cif(), request.currency(), request.highContention());
             return WalletResponse.from(wallet);
         });
         return ResponseEntity
-                .created(URI.create("/api/v1/wallets/" + response.walletId()))
+                .created(URI.create("/api/v1/wallets/" + response.accountNo()))
                 .body(response);
     }
 
-    @GetMapping("/{walletId}/balance")
-    public BalanceResponse getBalance(@PathVariable String walletId) {
-        return BalanceResponse.from(walletService.getBalance(walletId));
+    @GetMapping("/{accountNo}/balance")
+    public BalanceResponse getBalance(@PathVariable String accountNo) {
+        return BalanceResponse.from(walletService.getBalance(accountNo));
     }
 
-    @PostMapping("/{walletId}/debit")
+    @PostMapping("/{accountNo}/debit")
     public WalletResponse debit(@RequestHeader("Idempotency-Key") String idempotencyKey,
-                                 @PathVariable String walletId, @Valid @RequestBody DebitRequest request) {
+                                 @PathVariable String accountNo, @Valid @RequestBody DebitRequest request) {
         return idempotencyGuard.runIdempotent(idempotencyKey, WalletResponse.class, () -> {
-            Wallet wallet = walletService.debit(walletId, request.amount(), request.transactionId());
+            Wallet wallet = walletService.debit(accountNo, request.amount(), request.transactionId());
             return WalletResponse.from(wallet);
         });
     }
 
-    @PostMapping("/{walletId}/credit")
+    @PostMapping("/{accountNo}/credit")
     public WalletResponse credit(@RequestHeader("Idempotency-Key") String idempotencyKey,
-                                  @PathVariable String walletId, @Valid @RequestBody CreditRequest request) {
+                                  @PathVariable String accountNo, @Valid @RequestBody CreditRequest request) {
         return idempotencyGuard.runIdempotent(idempotencyKey, WalletResponse.class, () -> {
-            Wallet wallet = walletService.credit(walletId, request.amount(), request.transactionId());
+            Wallet wallet = walletService.credit(accountNo, request.amount(), request.transactionId());
             return WalletResponse.from(wallet);
         });
     }
 
-    @PostMapping("/{walletId}/reserve")
+    @PostMapping("/{accountNo}/reserve")
     public ResponseEntity<ReservationResponse> reserve(@RequestHeader("Idempotency-Key") String idempotencyKey,
-                                                         @PathVariable String walletId, @Valid @RequestBody ReserveRequest request) {
+                                                         @PathVariable String accountNo, @Valid @RequestBody ReserveRequest request) {
         ReservationResponse response = idempotencyGuard.runIdempotent(idempotencyKey, ReservationResponse.class, () -> {
-            WalletReservation reservation = walletService.reserveFunds(walletId, request.amount(), request.transactionId());
+            WalletReservation reservation = walletService.reserveFunds(accountNo, request.amount(), request.transactionId());
             return ReservationResponse.from(reservation);
         });
         return ResponseEntity

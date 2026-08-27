@@ -14,7 +14,6 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -44,13 +43,15 @@ public class RateRefreshScheduler {
 
     private final FxRateCache cache;
     private final FxRateRepository repository;
+    private final SequenceIds sequenceIds;
     private final List<Pair> pairs;
     private final Map<String, BigDecimal> lastRates = new HashMap<>();
 
-    public RateRefreshScheduler(FxRateCache cache, FxRateRepository repository,
+    public RateRefreshScheduler(FxRateCache cache, FxRateRepository repository, SequenceIds sequenceIds,
                                  @Value("${fx.rate.pairs}") String pairsConfig) {
         this.cache = cache;
         this.repository = repository;
+        this.sequenceIds = sequenceIds;
         this.pairs = parsePairs(pairsConfig);
     }
 
@@ -62,7 +63,7 @@ public class RateRefreshScheduler {
             BigDecimal newRate = nextRate(pair.key());
             lastRates.put(pair.key(), newRate);
             nextSnapshot.put(pair.key(), new FxRateCache.RateSnapshot(newRate, SOURCE, now));
-            repository.save(new FxRate(UUID.randomUUID().toString(), pair.base(), pair.quote(), newRate, SOURCE, now));
+            repository.save(new FxRate(sequenceIds.next("fx_rate_seq", "FR"), pair.base(), pair.quote(), newRate, SOURCE, now));
         }
         cache.refresh(nextSnapshot);
         log.debug("Refreshed {} rate(s) at {}", pairs.size(), now);

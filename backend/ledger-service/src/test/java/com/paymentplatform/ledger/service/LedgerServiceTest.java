@@ -83,10 +83,10 @@ class LedgerServiceTest {
 
     @Test
     void getStatement_returnsWalletEntriesFromRepository() {
-        LedgerEntry entry = new LedgerEntry("entry-1", "txn-1", "wallet-A", EntryType.DEBIT,
+        LedgerEntry entry = new LedgerEntry("0120260827000001", "01", "011000000001", EntryType.DEBIT,
                 new BigDecimal("100.00"), "USD", new BigDecimal("400.00"));
-        when(repository.findByWalletIdOrderByCreatedAtAsc("wallet-A")).thenReturn(List.of(entry));
+        when(repository.findByAccountNoOrderByCreatedAtAsc("011000000001")).thenReturn(List.of(entry));
 
-        assertThat(ledgerService.getStatement("wallet-A")).containsExactly(entry);
+        assertThat(ledgerService.getStatement("011000000001")).containsExactly(entry);
     }
 }

@@ -6,12 +6,12 @@ import com.paymentplatform.wallet.domain.WalletStatus;
 import java.math.BigDecimal;
 
 public record BalanceResponse(
-        String walletId,
+        String accountNo,
         String currency,
         BigDecimal balance,
         WalletStatus status
 ) {
     public static BalanceResponse from(Wallet wallet) {
-        return new BalanceResponse(wallet.getWalletId(), wallet.getCurrency(), wallet.getBalance(), wallet.getStatus());
+        return new BalanceResponse(wallet.getAccountNo(), wallet.getCurrency(), wallet.getBalance(), wallet.getStatus());
     }
 }

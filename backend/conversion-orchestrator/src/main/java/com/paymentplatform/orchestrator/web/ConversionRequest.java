@@ -3,23 +3,21 @@ package com.paymentplatform.orchestrator.web;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
 
 public record ConversionRequest(
-        @NotBlank String userId,
-        @NotBlank String sourceWalletId,
-        @NotBlank String destWalletId,
+        @NotBlank @Pattern(regexp = "\\d{10}", message = "must be a 10-digit CIF") String cif,
+        @NotBlank @Pattern(regexp = "\\d{12}", message = "must be a 12-digit account number") String sourceAccountNo,
+        @NotBlank @Pattern(regexp = "\\d{12}", message = "must be a 12-digit account number") String destAccountNo,
         @NotBlank @Size(min = 3, max = 3) String sourceCurrency,
         @NotBlank @Size(min = 3, max = 3) String destCurrency,
         @NotNull @DecimalMin(value = "0.0001") BigDecimal sourceAmount,
         /**
-         * Optional. Absent (or blank) → plain wallet-to-wallet conversion, saga ends at
-         * {@code DEST_CREDITED -> COMPLETED}. Present → after the conversion, the saga also
-         * charges this merchant for the converted amount via merchant-payment-service, ending
-         * at {@code PAYMENT_COMPLETED -> COMPLETED} on approval, or fully compensating (both
-         * the credit and the debit reversed) on a decline.
+         * Optional. Absent (or blank) → plain wallet-to-wallet conversion. Present → after the
+         * conversion, the saga also charges this merchant for the converted amount.
          */
         String merchantId
 ) {

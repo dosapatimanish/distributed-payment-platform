@@ -11,8 +11,11 @@ import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class RateRefreshSchedulerTest {
@@ -20,11 +23,18 @@ class RateRefreshSchedulerTest {
     @Mock
     private FxRateRepository repository;
 
+    @Mock
+    private SequenceIds sequenceIds;
+
+    @org.junit.jupiter.api.BeforeEach
+    void stubIds() {
+        lenient().when(sequenceIds.next(anyString(), anyString())).thenReturn("FR0000000001");
+    }
+
     @Test
     void refreshRates_seedsCacheAndPersistsOneRowPerConfiguredPair() {
         FxRateCache cache = new FxRateCache();
-        RateRefreshScheduler scheduler = new RateRefreshScheduler(
-                cache, repository, "USD:INR:83.0000,USD:EUR:0.9200");
+        RateRefreshScheduler scheduler = new RateRefreshScheduler(cache, repository, sequenceIds, "USD:INR:83.0000,USD:EUR:0.9200");
 
         scheduler.refreshRates();
 
@@ -36,7 +46,7 @@ class RateRefreshSchedulerTest {
     @Test
     void refreshRates_movesRateWithinBoundedStepOfPreviousValue() {
         FxRateCache cache = new FxRateCache();
-        RateRefreshScheduler scheduler = new RateRefreshScheduler(cache, repository, "USD:INR:83.0000");
+        RateRefreshScheduler scheduler = new RateRefreshScheduler(cache, repository, sequenceIds, "USD:INR:83.0000");
 
         scheduler.refreshRates();
         BigDecimal afterFirstTick = cache.get("USD", "INR").orElseThrow().rate();
@@ -54,6 +64,6 @@ class RateRefreshSchedulerTest {
         FxRateCache cache = new FxRateCache();
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-                () -> new RateRefreshScheduler(cache, repository, "USD-INR-83.0000"));
+                () -> new RateRefreshScheduler(cache, repository, sequenceIds, "USD-INR-83.0000"));
     }
 }

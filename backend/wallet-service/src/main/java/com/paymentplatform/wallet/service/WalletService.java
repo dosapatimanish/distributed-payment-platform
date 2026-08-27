@@ -1,5 +1,6 @@
 package com.paymentplatform.wallet.service;
 
+import com.paymentplatform.wallet.domain.Currency;
 import com.paymentplatform.wallet.domain.ReservationStatus;
 import com.paymentplatform.wallet.domain.Wallet;
 import com.paymentplatform.wallet.domain.WalletReservation;
@@ -25,6 +26,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
@@ -35,19 +37,9 @@ import java.util.UUID;
 import java.util.function.UnaryOperator;
 
 /**
- * All wallet business logic lives here, including the two concurrency-control strategies
- * described in the design doc (section 6.2.1):
- *
- * <ul>
- *   <li><b>Optimistic locking with retry</b> - the default path. Relies on {@code Wallet.version}
- *       (a JPA {@code @Version} column); a lost race throws
- *       {@link ObjectOptimisticLockingFailureException} at commit time, which we catch and retry
- *       a bounded number of times with a small backoff.</li>
- *   <li><b>Pessimistic locking</b> - for wallets flagged {@code highContention=true} (e.g. a
- *       platform fee pool hit thousands of times/sec). Uses {@code SELECT ... FOR UPDATE} via
- *       {@link WalletRepository#findByIdForUpdate}, so a request simply queues for the row lock
- *       instead of racing and retrying.</li>
- * </ul>
+ * All wallet business logic, including the two concurrency-control strategies from the design
+ * doc (§6.2.1): optimistic locking with retry (default) and pessimistic {@code SELECT ... FOR
+ * UPDATE} for wallets flagged {@code highContention}.
  */
 @Service
 public class WalletService {
@@ -61,6 +53,9 @@ public class WalletService {
     private final WalletRepository walletRepository;
     private final WalletReservationRepository reservationRepository;
     private final WalletEventPublisher eventPublisher;
+    private final CurrencyService currencyService;
+    private final AccountNumberGenerator accountNumberGenerator;
+    private final SequenceIds sequenceIds;
     private final TransactionTemplate transactionTemplate;
     private final Duration reservationTtl;
     private final MeterRegistry meterRegistry;
@@ -68,16 +63,20 @@ public class WalletService {
     public WalletService(WalletRepository walletRepository,
                           WalletReservationRepository reservationRepository,
                           WalletEventPublisher eventPublisher,
+                          CurrencyService currencyService,
+                          AccountNumberGenerator accountNumberGenerator,
+                          SequenceIds sequenceIds,
                           PlatformTransactionManager transactionManager,
                           @Value("${wallet.reservation.ttl-minutes}") long reservationTtlMinutes,
                           MeterRegistry meterRegistry) {
         this.walletRepository = walletRepository;
         this.reservationRepository = reservationRepository;
         this.eventPublisher = eventPublisher;
+        this.currencyService = currencyService;
+        this.accountNumberGenerator = accountNumberGenerator;
+        this.sequenceIds = sequenceIds;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
-        // Force a brand-new transaction on every call, regardless of what the caller is doing -
-        // this is what lets each optimistic-retry attempt start with a clean persistence context.
         this.transactionTemplate.setPropagationBehavior(
                 org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.reservationTtl = Duration.ofMinutes(reservationTtlMinutes);
@@ -87,52 +86,57 @@ public class WalletService {
     // Wallet lifecycle
     // ------------------------------------------------------------------
 
-    public Wallet createWallet(String userId, String currency, boolean highContention) {
-        walletRepository.findByUserIdAndCurrency(userId, currency).ifPresent(w -> {
-            throw new DuplicateWalletException(userId, currency);
+    /**
+     * Creates an ACTIVE wallet for {@code (cif, currency)} with a freshly minted account number.
+     * {@code @Transactional} so the currency check, duplicate check, account-number sequence
+     * bump and insert are one unit - {@link AccountNumberGenerator}'s MERGE row lock is held to
+     * this method's commit.
+     */
+    @Transactional
+    public Wallet createWallet(String cif, String currency, boolean highContention) {
+        Currency ccy = currencyService.requireActive(currency);
+        walletRepository.findByCifAndCurrency(cif, currency).ifPresent(w -> {
+            throw new DuplicateWalletException(cif, currency);
         });
+        String accountNo = accountNumberGenerator.nextAccountNumber(ccy.getShortCode(), cif);
         Wallet wallet = new Wallet(
-                UUID.randomUUID().toString(), userId, currency,
+                accountNo, cif, currency,
                 BigDecimal.ZERO.setScale(MONEY_SCALE, RoundingMode.HALF_UP),
                 WalletStatus.ACTIVE, highContention);
         try {
             return walletRepository.save(wallet);
         } catch (DataIntegrityViolationException ex) {
-            // Defensive fallback: two concurrent create-wallet calls for the same (userId,
-            // currency) could both pass the check above and race to the DB's unique constraint.
-            throw new DuplicateWalletException(userId, currency);
+            // Two concurrent create-wallet calls for the same (cif, currency) could both pass the
+            // check above and race to uk_wallet_cif_currency; a genuine account-number collision
+            // (two CIFs sharing a 5-digit prefix) also lands here on uk on account_no.
+            throw new DuplicateWalletException(cif, currency);
         }
     }
 
-    public Wallet getBalance(String walletId) {
-        return walletRepository.findById(walletId)
-                .orElseThrow(() -> new WalletNotFoundException(walletId));
+    public Wallet getBalance(String accountNo) {
+        return walletRepository.findById(accountNo)
+                .orElseThrow(() -> new WalletNotFoundException(accountNo));
     }
 
-    public Wallet debit(String walletId, BigDecimal amount, String transactionId) {
-        log.debug("Debiting {} {} from wallet {}", amount, transactionId, walletId);
+    public Wallet debit(String accountNo, BigDecimal amount, String transactionId) {
+        log.debug("Debiting {} ({}) from account {}", amount, transactionId, accountNo);
         try {
-            Wallet result = applyMutation(walletId, wallet -> debitMutation(wallet, amount));
+            Wallet result = applyMutation(accountNo, wallet -> debitMutation(wallet, amount));
             eventPublisher.publishDebited(
-                    new WalletDebitedEvent(walletId, transactionId, amount, result.getBalance(), Instant.now()));
+                    new WalletDebitedEvent(accountNo, transactionId, amount, result.getBalance(), Instant.now()));
             return result;
         } catch (RuntimeException ex) {
-            // Every debit failure - not found, not active, insufficient funds, or a concurrency
-            // conflict - is reported here. The orchestrator (once it exists) needs to know a
-            // debit step failed regardless of why, to decide whether to retry or compensate.
             eventPublisher.publishDebitFailed(
-                    new WalletDebitFailedEvent(walletId, transactionId, amount, ex.getMessage(), Instant.now()));
+                    new WalletDebitFailedEvent(accountNo, transactionId, amount, ex.getMessage(), Instant.now()));
             throw ex;
         }
     }
 
-    public Wallet credit(String walletId, BigDecimal amount, String transactionId) {
-        log.debug("Crediting {} {} to wallet {}", amount, transactionId, walletId);
-        Wallet result = applyMutation(walletId, wallet -> creditMutation(wallet, amount));
-        // No wallet.credit.failed topic in the design doc's topic table (6.5) - only the
-        // success case is published for credits.
+    public Wallet credit(String accountNo, BigDecimal amount, String transactionId) {
+        log.debug("Crediting {} ({}) to account {}", amount, transactionId, accountNo);
+        Wallet result = applyMutation(accountNo, wallet -> creditMutation(wallet, amount));
         eventPublisher.publishCredited(
-                new WalletCreditedEvent(walletId, transactionId, amount, result.getBalance(), Instant.now()));
+                new WalletCreditedEvent(accountNo, transactionId, amount, result.getBalance(), Instant.now()));
         return result;
     }
 
@@ -140,30 +144,23 @@ public class WalletService {
     // Reservations (holds)
     // ------------------------------------------------------------------
 
-    public WalletReservation reserveFunds(String walletId, BigDecimal amount, String transactionId) {
-        Wallet probe = walletRepository.findById(walletId)
-                .orElseThrow(() -> new WalletNotFoundException(walletId));
+    public WalletReservation reserveFunds(String accountNo, BigDecimal amount, String transactionId) {
+        Wallet probe = walletRepository.findById(accountNo)
+                .orElseThrow(() -> new WalletNotFoundException(accountNo));
 
         if (probe.isHighContention()) {
-            // Serialize the "is there enough balance" check + insert under the row lock, so two
-            // concurrent holds against a hot wallet can't both succeed against balance that only
-            // covers one of them.
             return transactionTemplate.execute(status -> {
-                Wallet locked = walletRepository.findByIdForUpdate(walletId)
-                        .orElseThrow(() -> new WalletNotFoundException(walletId));
+                Wallet locked = walletRepository.findByIdForUpdate(accountNo)
+                        .orElseThrow(() -> new WalletNotFoundException(accountNo));
                 return createReservation(locked, amount, transactionId);
             });
         }
-        // Low-contention wallets: a plain read-then-insert. Note this does not fully close the
-        // race between two concurrent reserves on the same wallet (balance itself is never
-        // decremented at hold time - see the class javadoc), which is an accepted simplification
-        // for this step; closing it fully would mean tracking "held" totals separately.
         return createReservation(probe, amount, transactionId);
     }
 
     public Wallet captureReservation(String reservationId) {
         WalletReservation reservation = requireHeldReservation(reservationId);
-        Wallet debited = debit(reservation.getWalletId(), reservation.getAmount(), reservation.getTransactionId());
+        Wallet debited = debit(reservation.getAccountNo(), reservation.getAmount(), reservation.getTransactionId());
         reservation.setStatus(ReservationStatus.CAPTURED);
         reservationRepository.save(reservation);
         return debited;
@@ -173,9 +170,8 @@ public class WalletService {
         WalletReservation reservation = requireHeldReservation(reservationId);
         reservation.setStatus(ReservationStatus.RELEASED);
         reservationRepository.save(reservation);
-        // No balance mutation - the hold never touched wallet.balance in the first place.
-        return walletRepository.findById(reservation.getWalletId())
-                .orElseThrow(() -> new WalletNotFoundException(reservation.getWalletId()));
+        return walletRepository.findById(reservation.getAccountNo())
+                .orElseThrow(() -> new WalletNotFoundException(reservation.getAccountNo()));
     }
 
     private WalletReservation requireHeldReservation(String reservationId) {
@@ -191,71 +187,50 @@ public class WalletService {
         requireActive(wallet);
         requireSufficientFunds(wallet, amount);
         WalletReservation reservation = new WalletReservation(
-                UUID.randomUUID().toString(), wallet.getWalletId(), transactionId,
+                sequenceIds.next("wallet_reservation_seq", "RS"), wallet.getAccountNo(), transactionId,
                 amount.setScale(MONEY_SCALE, RoundingMode.HALF_UP),
                 ReservationStatus.HELD, Instant.now().plus(reservationTtl));
         return reservationRepository.save(reservation);
     }
 
     // ------------------------------------------------------------------
-    // Concurrency-control dispatch (design doc 6.2.1)
+    // Concurrency-control dispatch (design doc §6.2.1)
     // ------------------------------------------------------------------
 
-    private Wallet applyMutation(String walletId, UnaryOperator<Wallet> mutation) {
-        Wallet probe = walletRepository.findById(walletId)
-                .orElseThrow(() -> new WalletNotFoundException(walletId));
+    private Wallet applyMutation(String accountNo, UnaryOperator<Wallet> mutation) {
+        Wallet probe = walletRepository.findById(accountNo)
+                .orElseThrow(() -> new WalletNotFoundException(accountNo));
         return probe.isHighContention()
-                ? applyWithPessimisticLock(walletId, mutation)
-                : applyWithOptimisticRetry(walletId, mutation);
+                ? applyWithPessimisticLock(accountNo, mutation)
+                : applyWithOptimisticRetry(accountNo, mutation);
     }
 
-    /**
-     * Retries a mutation up to {@link #MAX_OPTIMISTIC_ATTEMPTS} times on optimistic-lock
-     * conflicts, with a linear backoff (20ms, 40ms, 60ms, 80ms). Each attempt runs in its own,
-     * brand-new transaction via {@link #transactionTemplate} - deliberately NOT a
-     * {@code @Transactional} method on {@code this}, because a self-invoked {@code @Transactional}
-     * call bypasses Spring's proxy and silently would not open a new transaction at all, which
-     * would let a failed attempt's stale persistence context poison the next retry.
-     */
-    private Wallet applyWithOptimisticRetry(String walletId, UnaryOperator<Wallet> mutation) {
+    private Wallet applyWithOptimisticRetry(String accountNo, UnaryOperator<Wallet> mutation) {
         for (int attempt = 1; ; attempt++) {
             try {
                 return transactionTemplate.execute(status -> {
-                    Wallet wallet = walletRepository.findById(walletId)
-                            .orElseThrow(() -> new WalletNotFoundException(walletId));
+                    Wallet wallet = walletRepository.findById(accountNo)
+                            .orElseThrow(() -> new WalletNotFoundException(accountNo));
                     return walletRepository.save(mutation.apply(wallet));
                 });
             } catch (ObjectOptimisticLockingFailureException ex) {
-                // design doc 5.4's "optimistic-lock retry rate" NFR metric - one increment per
-                // lost race, regardless of whether this attempt goes on to retry or exhausts.
                 meterRegistry.counter("wallet.optimistic.lock.retries").increment();
                 if (attempt >= MAX_OPTIMISTIC_ATTEMPTS) {
-                    throw new WalletConflictException(walletId, attempt);
+                    throw new WalletConflictException(accountNo, attempt);
                 }
-                log.info("Optimistic lock conflict on wallet {} (attempt {}/{}), retrying",
-                        walletId, attempt, MAX_OPTIMISTIC_ATTEMPTS);
+                log.info("Optimistic lock conflict on account {} (attempt {}/{}), retrying",
+                        accountNo, attempt, MAX_OPTIMISTIC_ATTEMPTS);
                 sleepBackoff(BASE_BACKOFF_MS * attempt);
             }
         }
     }
 
-    private Wallet applyWithPessimisticLock(String walletId, UnaryOperator<Wallet> mutation) {
-        log.debug("Acquiring pessimistic lock on wallet {}", walletId);
-        // Same reasoning as applyWithOptimisticRetry: this must go through transactionTemplate,
-        // not a plain @Transactional method on this class. applyMutation() calls this method via
-        // a direct "this." call, not through the Spring proxy, so an @Transactional annotation
-        // here would silently never take effect (proven the hard way: the first version of this
-        // method used @Transactional and failed every call with
-        // "jakarta.persistence.TransactionRequiredException: No active transaction", because
-        // findByIdForUpdate's SELECT ... FOR UPDATE ran with no transaction open at all).
+    private Wallet applyWithPessimisticLock(String accountNo, UnaryOperator<Wallet> mutation) {
+        log.debug("Acquiring pessimistic lock on account {}", accountNo);
         return transactionTemplate.execute(status -> {
-            Wallet wallet = walletRepository.findByIdForUpdate(walletId)
-                    .orElseThrow(() -> new WalletNotFoundException(walletId));
+            Wallet wallet = walletRepository.findByIdForUpdate(accountNo)
+                    .orElseThrow(() -> new WalletNotFoundException(accountNo));
             return walletRepository.save(mutation.apply(wallet));
-            // If the lock can't be acquired within the configured timeout, Spring translates the
-            // driver's error into a PessimisticLockingFailureException, which
-            // GlobalExceptionHandler maps to 409 - a stalled caller fails fast instead of
-            // queuing forever.
         });
     }
 
@@ -287,19 +262,19 @@ public class WalletService {
 
     private void requireActive(Wallet wallet) {
         if (wallet.getStatus() != WalletStatus.ACTIVE) {
-            throw new WalletNotActiveException(wallet.getWalletId(), wallet.getStatus());
+            throw new WalletNotActiveException(wallet.getAccountNo(), wallet.getStatus());
         }
     }
 
     private void requireNotClosed(Wallet wallet) {
         if (wallet.getStatus() == WalletStatus.CLOSED) {
-            throw new WalletNotActiveException(wallet.getWalletId(), wallet.getStatus());
+            throw new WalletNotActiveException(wallet.getAccountNo(), wallet.getStatus());
         }
     }
 
     private void requireSufficientFunds(Wallet wallet, BigDecimal amount) {
         if (amount.compareTo(wallet.getBalance()) > 0) {
-            throw new InsufficientFundsException(wallet.getWalletId(), amount, wallet.getBalance());
+            throw new InsufficientFundsException(wallet.getAccountNo(), amount, wallet.getBalance());
         }
     }
 }

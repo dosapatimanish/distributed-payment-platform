@@ -7,9 +7,9 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 public record LedgerEntryResponse(
-        String entryId,
         String transactionId,
-        String walletId,
+        String entryNo,
+        String accountNo,
         EntryType entryType,
         BigDecimal amount,
         String currency,
@@ -18,9 +18,9 @@ public record LedgerEntryResponse(
 ) {
     public static LedgerEntryResponse from(LedgerEntry entry) {
         return new LedgerEntryResponse(
-                entry.getEntryId(),
                 entry.getTransactionId(),
-                entry.getWalletId(),
+                entry.getEntryNo(),
+                entry.getAccountNo(),
                 entry.getEntryType(),
                 entry.getAmount(),
                 entry.getCurrency(),

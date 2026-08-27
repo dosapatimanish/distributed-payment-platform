@@ -39,7 +39,7 @@ class MerchantPaymentRepositoryIntegrationTest {
     private MerchantPaymentRepository paymentRepository;
 
     private MerchantPayment samplePayment(String transactionId) {
-        return new MerchantPayment(UUID.randomUUID().toString(), transactionId, "merchant-1",
+        return new MerchantPayment("PM" + String.format("%010d", java.util.concurrent.ThreadLocalRandom.current().nextLong(1, 9999999999L)), transactionId, "merchant-1",
                 new BigDecimal("50.00"), "USD", "acq-ref-1", PaymentStatus.COMPLETED);
     }
 

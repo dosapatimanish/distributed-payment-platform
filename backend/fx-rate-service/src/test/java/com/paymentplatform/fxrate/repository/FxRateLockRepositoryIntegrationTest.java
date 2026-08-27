@@ -39,7 +39,7 @@ class FxRateLockRepositoryIntegrationTest {
     private FxRateLockRepository lockRepository;
 
     private FxRateLock sampleLock(String transactionId) {
-        return new FxRateLock(UUID.randomUUID().toString(), transactionId, "USD", "INR",
+        return new FxRateLock("LK" + String.format("%010d", java.util.concurrent.ThreadLocalRandom.current().nextLong(1, 9999999999L)), transactionId, "USD", "INR",
                 new BigDecimal("83.0000"), new BigDecimal("100.00"), RateLockStatus.ACTIVE,
                 Instant.now().plus(10, ChronoUnit.SECONDS));
     }

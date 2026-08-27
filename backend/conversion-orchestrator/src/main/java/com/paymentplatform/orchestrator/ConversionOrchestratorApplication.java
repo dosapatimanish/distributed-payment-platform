@@ -2,10 +2,12 @@ package com.paymentplatform.orchestrator;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.web.client.RestClient;
 import org.springframework.context.annotation.Bean;
 
 @SpringBootApplication
+@EnableScheduling
 public class ConversionOrchestratorApplication {
 
 	public static void main(String[] args) {

@@ -16,7 +16,6 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.UUID;
 
 /**
  * Charges (and refunds) a merchant payment via {@link AcquirerGatewayClient} (design doc
@@ -30,19 +29,21 @@ public class MerchantPaymentService {
     private final MerchantPaymentRepository repository;
     private final AcquirerGatewayClient acquirerClient;
     private final MerchantPaymentEventPublisher eventPublisher;
+    private final SequenceIds sequenceIds;
 
     public MerchantPaymentService(MerchantPaymentRepository repository, AcquirerGatewayClient acquirerClient,
-                                   MerchantPaymentEventPublisher eventPublisher) {
+                                   MerchantPaymentEventPublisher eventPublisher, SequenceIds sequenceIds) {
         this.repository = repository;
         this.acquirerClient = acquirerClient;
         this.eventPublisher = eventPublisher;
+        this.sequenceIds = sequenceIds;
     }
 
     public MerchantPayment pay(String transactionId, String merchantId, BigDecimal amount, String currency) {
         AcquirerChargeResult result = acquirerClient.charge(merchantId, amount, currency);
         PaymentStatus status = result.approved() ? PaymentStatus.COMPLETED : PaymentStatus.FAILED;
         MerchantPayment payment = new MerchantPayment(
-                UUID.randomUUID().toString(), transactionId, merchantId, amount, currency, result.acquirerRef(), status);
+                sequenceIds.next("merchant_payment_seq", "PM"), transactionId, merchantId, amount, currency, result.acquirerRef(), status);
         try {
             payment = repository.save(payment);
         } catch (DataIntegrityViolationException ex) {

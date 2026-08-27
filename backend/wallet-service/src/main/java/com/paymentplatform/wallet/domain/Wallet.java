@@ -16,30 +16,34 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * A single-currency balance owned by a user. One user can have at most one wallet per currency
- * (see the unique constraint below).
+ * A single-currency balance owned by a customer (identified by CIF). One CIF can have at most
+ * one wallet per currency (see the unique constraint below).
  *
- * Concurrency control (design doc section 6.2.1): every wallet carries a {@code version} column
- * that JPA uses for optimistic locking - the default path for ordinary wallets. A small number
- * of "hot" wallets (e.g. a platform fee pool hit by many transactions per second) are flagged
- * {@link #highContention}; those go through pessimistic locking (SELECT ... FOR UPDATE) instead.
- * See {@code WalletService} for exactly where that decision is made.
+ * The primary key is a 12-character bank-style account number,
+ * {@code [currency short_code 2][CIF prefix 5][sequence 5]} - see
+ * backend-documents/identifier-scheme.md and {@code AccountNumberGenerator}.
+ *
+ * Concurrency control (design doc §6.2.1): every wallet carries a {@code version} column that
+ * JPA uses for optimistic locking - the default path for ordinary wallets. A small number of
+ * "hot" wallets are flagged {@link #highContention}; those go through pessimistic locking
+ * (SELECT ... FOR UPDATE) instead. See {@code WalletService} for where that decision is made.
  */
 @Entity
 @Table(
         name = "wallet",
-        uniqueConstraints = @UniqueConstraint(name = "uk_wallet_user_currency", columnNames = {"user_id", "currency"}),
-        indexes = @Index(name = "idx_wallet_user_id", columnList = "user_id")
+        uniqueConstraints = @UniqueConstraint(name = "uk_wallet_cif_currency", columnNames = {"cif", "currency"}),
+        indexes = @Index(name = "idx_wallet_cif", columnList = "cif")
 )
 public class Wallet {
 
-    /** App-generated UUID string, not a DB-native UUID type - keeps the schema portable to Oracle later. */
+    /** 12-char account number - {@code [currency short_code][CIF prefix][sequence]}. */
     @Id
-    @Column(name = "wallet_id", length = 36, nullable = false, updatable = false)
-    private String walletId;
+    @Column(name = "account_no", length = 12, nullable = false, updatable = false)
+    private String accountNo;
 
-    @Column(name = "user_id", nullable = false)
-    private String userId;
+    /** 10-digit customer number, client-supplied. */
+    @Column(name = "cif", length = 10, nullable = false)
+    private String cif;
 
     /** ISO 4217 currency code, e.g. "USD". */
     @Column(name = "currency", length = 3, nullable = false)
@@ -52,7 +56,7 @@ public class Wallet {
     @Column(name = "status", length = 20, nullable = false)
     private WalletStatus status;
 
-    /** Config-driven flag (design doc 6.2.1): true routes this wallet's mutations through pessimistic locking. */
+    /** Config-driven flag (design doc §6.2.1): true routes this wallet's mutations through pessimistic locking. */
     @Column(name = "high_contention", nullable = false)
     private boolean highContention;
 
@@ -71,10 +75,10 @@ public class Wallet {
     protected Wallet() {
     }
 
-    public Wallet(String walletId, String userId, String currency, BigDecimal balance,
+    public Wallet(String accountNo, String cif, String currency, BigDecimal balance,
                   WalletStatus status, boolean highContention) {
-        this.walletId = walletId;
-        this.userId = userId;
+        this.accountNo = accountNo;
+        this.cif = cif;
         this.currency = currency;
         this.balance = balance;
         this.status = status;
@@ -93,12 +97,12 @@ public class Wallet {
         this.updatedAt = Instant.now();
     }
 
-    public String getWalletId() {
-        return walletId;
+    public String getAccountNo() {
+        return accountNo;
     }
 
-    public String getUserId() {
-        return userId;
+    public String getCif() {
+        return cif;
     }
 
     public String getCurrency() {

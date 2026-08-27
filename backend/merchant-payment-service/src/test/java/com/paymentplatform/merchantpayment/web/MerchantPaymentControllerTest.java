@@ -53,14 +53,14 @@ class MerchantPaymentControllerTest {
 
     @Test
     void pay_approved_returns201WithCompletedStatus() throws Exception {
-        when(paymentService.pay(eq("txn-1"), eq("merchant-1"), any(), eq("USD")))
+        when(paymentService.pay(eq("0120260827000001"), eq("merchant-1"), any(), eq("USD")))
                 .thenReturn(samplePayment(PaymentStatus.COMPLETED));
 
         mockMvc.perform(post("/api/v1/merchant-payments")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"transactionId":"txn-1","merchantId":"merchant-1","amount":50.00,"currency":"USD"}
+                                {"transactionId":"0120260827000001","merchantId":"merchant-1","amount":50.00,"currency":"USD"}
                                 """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.paymentId").value("pay-1"))
@@ -69,14 +69,14 @@ class MerchantPaymentControllerTest {
 
     @Test
     void pay_declined_stillReturns201WithFailedStatus() throws Exception {
-        when(paymentService.pay(eq("txn-1"), eq("acct-decline"), any(), eq("USD")))
+        when(paymentService.pay(eq("0120260827000001"), eq("acct-decline"), any(), eq("USD")))
                 .thenReturn(samplePayment(PaymentStatus.FAILED));
 
         mockMvc.perform(post("/api/v1/merchant-payments")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"transactionId":"txn-1","merchantId":"acct-decline","amount":50.00,"currency":"USD"}
+                                {"transactionId":"0120260827000001","merchantId":"acct-decline","amount":50.00,"currency":"USD"}
                                 """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.status").value("FAILED"));
@@ -87,7 +87,7 @@ class MerchantPaymentControllerTest {
         mockMvc.perform(post("/api/v1/merchant-payments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"transactionId":"txn-1","merchantId":"merchant-1","amount":50.00,"currency":"USD"}
+                                {"transactionId":"0120260827000001","merchantId":"merchant-1","amount":50.00,"currency":"USD"}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
@@ -99,7 +99,7 @@ class MerchantPaymentControllerTest {
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"transactionId":"txn-1","merchantId":"merchant-1","amount":50.00,"currency":"US"}
+                                {"transactionId":"0120260827000001","merchantId":"merchant-1","amount":50.00,"currency":"US"}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));

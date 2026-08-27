@@ -9,7 +9,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Writes double-entry ledger postings (design doc §6.3.5 {@code recordDoubleEntry}) and serves
@@ -35,22 +34,25 @@ public class LedgerService {
         }
         validator.validate(request.entries());
 
-        List<LedgerEntry> saved = request.entries().stream()
-                .map(line -> toEntity(request.transactionId(), line))
-                .map(repository::save)
-                .toList();
+        List<LedgerLineRequest> lines = request.entries();
+        List<LedgerEntry> saved = new java.util.ArrayList<>(lines.size());
+        for (int i = 0; i < lines.size(); i++) {
+            // entry_no = 2-digit leg number within the posting (identifier-scheme.md).
+            String entryNo = String.format("%02d", i + 1);
+            saved.add(repository.save(toEntity(request.transactionId(), entryNo, lines.get(i))));
+        }
         return saved;
     }
 
-    public List<LedgerEntry> getStatement(String walletId) {
-        return repository.findByWalletIdOrderByCreatedAtAsc(walletId);
+    public List<LedgerEntry> getStatement(String accountNo) {
+        return repository.findByAccountNoOrderByCreatedAtAsc(accountNo);
     }
 
-    private LedgerEntry toEntity(String transactionId, LedgerLineRequest line) {
+    private LedgerEntry toEntity(String transactionId, String entryNo, LedgerLineRequest line) {
         return new LedgerEntry(
-                UUID.randomUUID().toString(),
                 transactionId,
-                line.walletId(),
+                entryNo,
+                line.accountNo(),
                 line.entryType(),
                 line.amount(),
                 line.currency(),

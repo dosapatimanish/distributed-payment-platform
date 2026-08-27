@@ -8,9 +8,9 @@ import java.time.Instant;
 
 public record ConversionResponse(
         String transactionId,
-        String userId,
-        String sourceWalletId,
-        String destWalletId,
+        String cif,
+        String sourceAccountNo,
+        String destAccountNo,
         String sourceCurrency,
         String destCurrency,
         BigDecimal sourceAmount,
@@ -23,9 +23,9 @@ public record ConversionResponse(
     public static ConversionResponse from(ConversionTransaction txn) {
         return new ConversionResponse(
                 txn.getTransactionId(),
-                txn.getUserId(),
-                txn.getSourceWalletId(),
-                txn.getDestWalletId(),
+                txn.getCif(),
+                txn.getSourceAccountNo(),
+                txn.getDestAccountNo(),
                 txn.getSourceCurrency(),
                 txn.getDestCurrency(),
                 txn.getSourceAmount(),

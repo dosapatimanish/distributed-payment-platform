@@ -44,6 +44,9 @@ class FxRateServiceTest {
     @Mock
     private FxRateEventPublisher eventPublisher;
 
+    @Mock
+    private SequenceIds sequenceIds;
+
     private FxRateCache cache;
     private SimpleMeterRegistry meterRegistry;
     private FxRateService fxRateService;
@@ -52,8 +55,11 @@ class FxRateServiceTest {
     void setUp() {
         cache = new FxRateCache();
         meterRegistry = new SimpleMeterRegistry();
+        org.mockito.Mockito.lenient()
+                .when(sequenceIds.next(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn("LK0000000001");
         fxRateService = new FxRateService(cache, new DistributedLockManager(), lockRepository, eventPublisher,
-                LOCK_TTL_SECONDS, meterRegistry);
+                sequenceIds, LOCK_TTL_SECONDS, meterRegistry);
     }
 
     private void seedRate(String base, String quote, String rate) {

@@ -8,7 +8,7 @@ import java.time.Instant;
 
 public record ReservationResponse(
         String reservationId,
-        String walletId,
+        String accountNo,
         String transactionId,
         BigDecimal amount,
         ReservationStatus status,
@@ -18,7 +18,7 @@ public record ReservationResponse(
     public static ReservationResponse from(WalletReservation reservation) {
         return new ReservationResponse(
                 reservation.getReservationId(),
-                reservation.getWalletId(),
+                reservation.getAccountNo(),
                 reservation.getTransactionId(),
                 reservation.getAmount(),
                 reservation.getStatus(),

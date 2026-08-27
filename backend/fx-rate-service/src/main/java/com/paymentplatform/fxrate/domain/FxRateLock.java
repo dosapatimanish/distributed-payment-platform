@@ -30,10 +30,10 @@ import java.time.Instant;
 public class FxRateLock {
 
     @Id
-    @Column(name = "lock_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "lock_id", length = 20, nullable = false, updatable = false)
     private String lockId;
 
-    @Column(name = "transaction_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String transactionId;
 
     @Column(name = "base_currency", length = 3, nullable = false, updatable = false)

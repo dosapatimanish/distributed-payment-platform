@@ -40,11 +40,15 @@ class MerchantPaymentServiceTest {
     @Mock
     private MerchantPaymentEventPublisher eventPublisher;
 
+    @Mock
+    private SequenceIds sequenceIds;
+
     private MerchantPaymentService paymentService;
 
     @BeforeEach
     void setUp() {
-        paymentService = new MerchantPaymentService(repository, acquirerClient, eventPublisher);
+        org.mockito.Mockito.lenient().when(sequenceIds.next(anyString(), anyString())).thenReturn("PM0000000001");
+        paymentService = new MerchantPaymentService(repository, acquirerClient, eventPublisher, sequenceIds);
     }
 
     // ------------------------------------------------------------------

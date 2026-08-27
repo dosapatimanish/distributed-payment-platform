@@ -24,7 +24,7 @@ import java.time.Instant;
 public class FxRate {
 
     @Id
-    @Column(name = "rate_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "rate_id", length = 20, nullable = false, updatable = false)
     private String rateId;
 
     @Column(name = "base_currency", length = 3, nullable = false, updatable = false)
