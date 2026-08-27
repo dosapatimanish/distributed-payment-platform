@@ -5,6 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.Index;
 import jakarta.persistence.PostLoad;
 import jakarta.persistence.PrePersist;
@@ -16,46 +17,38 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * One immutable double-entry ledger line (design doc §6.1.5) - either the DEBIT or the CREDIT
- * side of a transaction against one wallet. Rows are append-only: no {@code UPDATE}/{@code
- * DELETE} at the application layer, a correction is always a new, offsetting entry (see
- * {@code LedgerService}).
+ * One immutable double-entry ledger line (design doc §6.1.5). Append-only: a correction is
+ * always a new, offsetting entry. Composite PK {@code (transaction_id, entry_no)}: {@code
+ * entryNo} is a 2-digit leg number within the posting ({@code 01}, {@code 02}, ...), so a row's
+ * position in the sequence is readable from the id (identifier-scheme.md).
  *
- * Implements {@link Persistable} for the same reason as every other application-assigned-ID
- * entity in this platform (conversion-orchestrator's {@code ConversionTransaction},
- * merchant-payment-service's {@code MerchantPayment}) - {@code entryId} is an application UUID,
- * not {@code @GeneratedValue}, and there is no {@code @Version} field, so without this Spring
- * Data JPA's default new-vs-existing check would route the first {@code save()} through {@code
- * merge()} instead of {@code persist()}, silently dropping the {@code @PrePersist}-set {@code
- * createdAt} from the object the caller already holds.
+ * Implements {@link Persistable} for the same reason as every other application-assigned-id
+ * entity here: no {@code @Version} field, so without an explicit {@code isNew} Spring Data JPA's
+ * first {@code save()} would go through {@code merge()} and drop the {@code @PrePersist}
+ * {@code createdAt} from the caller's instance.
  */
 @Entity
 @Table(
         name = "ledger_entry",
-        indexes = {
-                @Index(name = "idx_ledger_entry_transaction_id", columnList = "transaction_id"),
-                @Index(name = "idx_ledger_entry_wallet_id", columnList = "wallet_id")
-        }
+        indexes = @Index(name = "idx_ledger_entry_account_no", columnList = "account_no")
 )
-public class LedgerEntry implements Persistable<String> {
+@IdClass(LedgerEntryId.class)
+public class LedgerEntry implements Persistable<LedgerEntryId> {
 
     @Transient
     private boolean isNew = true;
 
     @Id
-    @Column(name = "entry_id", length = 36, nullable = false, updatable = false)
-    private String entryId;
-
-    // Wider than the design doc's literal VARCHAR2(36) (§6.1.5) - a UUID (36 chars) plus a
-    // "-reversal" suffix (design doc §5.3 step 11b's REVERSED entry, see conversion-orchestrator's
-    // ConversionService.recordLedgerReversal) needs 45+. A real bug caught in manual testing: the
-    // first live compensation scenario hit "value too long for type character varying(36)" on
-    // this exact column.
+    // Wide enough for a compensation reversal's "{16-digit}-reversal" (25 chars).
     @Column(name = "transaction_id", length = 64, nullable = false, updatable = false)
     private String transactionId;
 
-    @Column(name = "wallet_id", length = 36, nullable = false, updatable = false)
-    private String walletId;
+    @Id
+    @Column(name = "entry_no", length = 4, nullable = false, updatable = false)
+    private String entryNo;
+
+    @Column(name = "account_no", length = 12, nullable = false, updatable = false)
+    private String accountNo;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "entry_type", length = 10, nullable = false, updatable = false)
@@ -76,11 +69,11 @@ public class LedgerEntry implements Persistable<String> {
     protected LedgerEntry() {
     }
 
-    public LedgerEntry(String entryId, String transactionId, String walletId, EntryType entryType,
+    public LedgerEntry(String transactionId, String entryNo, String accountNo, EntryType entryType,
                         BigDecimal amount, String currency, BigDecimal balanceAfter) {
-        this.entryId = entryId;
         this.transactionId = transactionId;
-        this.walletId = walletId;
+        this.entryNo = entryNo;
+        this.accountNo = accountNo;
         this.entryType = entryType;
         this.amount = amount;
         this.currency = currency;
@@ -99,8 +92,8 @@ public class LedgerEntry implements Persistable<String> {
     }
 
     @Override
-    public String getId() {
-        return entryId;
+    public LedgerEntryId getId() {
+        return new LedgerEntryId(transactionId, entryNo);
     }
 
     @Override
@@ -108,16 +101,16 @@ public class LedgerEntry implements Persistable<String> {
         return isNew;
     }
 
-    public String getEntryId() {
-        return entryId;
-    }
-
     public String getTransactionId() {
         return transactionId;
     }
 
-    public String getWalletId() {
-        return walletId;
+    public String getEntryNo() {
+        return entryNo;
+    }
+
+    public String getAccountNo() {
+        return accountNo;
     }
 
     public EntryType getEntryType() {

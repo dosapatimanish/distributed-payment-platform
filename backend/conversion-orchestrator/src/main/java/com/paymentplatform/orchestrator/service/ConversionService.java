@@ -30,7 +30,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Drives the wallet-to-wallet conversion saga, optionally followed by a merchant charge (design
@@ -67,6 +66,7 @@ public class ConversionService {
     private final FxRateServiceClient fxRateClient;
     private final MerchantPaymentServiceClient merchantPaymentClient;
     private final LedgerServiceClient ledgerClient;
+    private final TransactionIdGenerator transactionIdGenerator;
     private final String clearingAccountId;
     private final MeterRegistry meterRegistry;
 
@@ -76,6 +76,7 @@ public class ConversionService {
                               FxRateServiceClient fxRateClient,
                               MerchantPaymentServiceClient merchantPaymentClient,
                               LedgerServiceClient ledgerClient,
+                              TransactionIdGenerator transactionIdGenerator,
                               @Value("${orchestrator.ledger.clearing-account-id}") String clearingAccountId,
                               MeterRegistry meterRegistry) {
         this.transactionRepository = transactionRepository;
@@ -84,6 +85,7 @@ public class ConversionService {
         this.fxRateClient = fxRateClient;
         this.merchantPaymentClient = merchantPaymentClient;
         this.ledgerClient = ledgerClient;
+        this.transactionIdGenerator = transactionIdGenerator;
         this.clearingAccountId = clearingAccountId;
         this.meterRegistry = meterRegistry;
     }
@@ -94,8 +96,9 @@ public class ConversionService {
     }
 
     public ConversionTransaction startConversion(String idempotencyKey, ConversionRequest request) {
+        String transactionId = transactionIdGenerator.next(request.sourceCurrency());
         ConversionTransaction txn = new ConversionTransaction(
-                UUID.randomUUID().toString(), request.userId(), request.sourceWalletId(), request.destWalletId(),
+                transactionId, request.cif(), request.sourceAccountNo(), request.destAccountNo(),
                 request.sourceCurrency(), request.destCurrency(), request.sourceAmount(), idempotencyKey);
         // Use save()'s return value, not the object just passed in - see ConversionTransaction's
         // Persistable javadoc for why the two aren't reliably the same instance.
@@ -120,24 +123,24 @@ public class ConversionService {
 
         WalletResponse debitResult;
         try {
-            debitResult = walletClient.debit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(), idempotencyKey + "-debit");
+            debitResult = walletClient.debit(txn.getSourceAccountNo(), txn.getSourceAmount(), txn.getTransactionId(), idempotencyKey + "-debit");
         } catch (RestClientException ex) {
             logStep(txn, "DEBIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.DEBIT_FAILED);
             return compensate(txn, idempotencyKey, false, false);
         }
-        logStep(txn, "DEBIT", StepStatus.SUCCESS, "amount=" + txn.getSourceAmount());
+        logStep(txn, "DEBIT", StepStatus.SUCCESS, "amount=" + txn.getSourceAmount(), txn.getSourceAccountNo());
         txn = transition(txn, SagaState.SOURCE_DEBITED);
 
         WalletResponse creditResult;
         try {
-            creditResult = walletClient.credit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-credit");
+            creditResult = walletClient.credit(txn.getDestAccountNo(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-credit");
         } catch (RestClientException ex) {
             logStep(txn, "CREDIT", StepStatus.FAILED, describe(ex));
             txn = transition(txn, SagaState.CREDIT_FAILED);
             return compensate(txn, idempotencyKey, false, true);
         }
-        logStep(txn, "CREDIT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount());
+        logStep(txn, "CREDIT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount(), txn.getDestAccountNo());
         txn = transition(txn, SagaState.DEST_CREDITED);
 
         if (request.hasMerchantId()) {
@@ -210,7 +213,7 @@ public class ConversionService {
         logStep(txn, "PAYMENT", StepStatus.SUCCESS, "paymentId=" + payment.paymentId());
 
         try {
-            walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-spend");
+            walletClient.debit(txn.getDestAccountNo(), txn.getDestAmount(), txn.getTransactionId(), idempotencyKey + "-spend");
         } catch (RestClientException ex) {
             // The acquirer has already been charged for real at this point - refund it before
             // falling back to the normal compensation path, so a saga we're about to unwind
@@ -229,7 +232,7 @@ public class ConversionService {
             txn = transition(txn, SagaState.PAYMENT_FAILED);
             return compensate(txn, idempotencyKey, true, true);
         }
-        logStep(txn, "DEBIT_FOR_PAYMENT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount());
+        logStep(txn, "DEBIT_FOR_PAYMENT", StepStatus.SUCCESS, "amount=" + txn.getDestAmount(), txn.getDestAccountNo());
         return transition(txn, SagaState.PAYMENT_COMPLETED);
     }
 
@@ -243,10 +246,10 @@ public class ConversionService {
         BigDecimal destBalanceAfterReversal = null;
         if (reverseCredit) {
             try {
-                WalletResponse result = walletClient.debit(txn.getDestWalletId(), txn.getDestAmount(), txn.getTransactionId(),
+                WalletResponse result = walletClient.debit(txn.getDestAccountNo(), txn.getDestAmount(), txn.getTransactionId(),
                         idempotencyKey + "-compensate-credit");
                 destBalanceAfterReversal = result.balance();
-                logStep(txn, "COMPENSATE_CREDIT", StepStatus.COMPENSATED, "amount=" + txn.getDestAmount());
+                logStep(txn, "COMPENSATE_CREDIT", StepStatus.COMPENSATED, "amount=" + txn.getDestAmount(), txn.getDestAccountNo());
                 txn = transition(txn, SagaState.DEST_DEBITED_BACK);
             } catch (RestClientException ex) {
                 logStep(txn, "COMPENSATE_CREDIT", StepStatus.FAILED, describe(ex));
@@ -258,10 +261,10 @@ public class ConversionService {
         BigDecimal sourceBalanceAfterReversal = null;
         if (reverseDebit) {
             try {
-                WalletResponse result = walletClient.credit(txn.getSourceWalletId(), txn.getSourceAmount(), txn.getTransactionId(),
+                WalletResponse result = walletClient.credit(txn.getSourceAccountNo(), txn.getSourceAmount(), txn.getTransactionId(),
                         idempotencyKey + "-compensate-debit");
                 sourceBalanceAfterReversal = result.balance();
-                logStep(txn, "COMPENSATE_DEBIT", StepStatus.COMPENSATED, "amount=" + txn.getSourceAmount());
+                logStep(txn, "COMPENSATE_DEBIT", StepStatus.COMPENSATED, "amount=" + txn.getSourceAmount(), txn.getSourceAccountNo());
                 txn = transition(txn, SagaState.SOURCE_CREDITED_BACK);
             } catch (RestClientException ex) {
                 // Deliberate gap: no automatic retry of a failed compensation step in this pass -
@@ -307,10 +310,10 @@ public class ConversionService {
     private void recordLedgerEntries(ConversionTransaction txn, String idempotencyKey,
                                       BigDecimal sourceBalanceAfter, BigDecimal destBalanceAfter) {
         List<LedgerLineRequest> entries = List.of(
-                new LedgerLineRequest(txn.getSourceWalletId(), LedgerEntryType.DEBIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfter),
+                new LedgerLineRequest(txn.getSourceAccountNo(), LedgerEntryType.DEBIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfter),
                 new LedgerLineRequest(clearingAccountId, LedgerEntryType.CREDIT, txn.getSourceAmount(), txn.getSourceCurrency(), BigDecimal.ZERO),
                 new LedgerLineRequest(clearingAccountId, LedgerEntryType.DEBIT, txn.getDestAmount(), txn.getDestCurrency(), BigDecimal.ZERO),
-                new LedgerLineRequest(txn.getDestWalletId(), LedgerEntryType.CREDIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfter)
+                new LedgerLineRequest(txn.getDestAccountNo(), LedgerEntryType.CREDIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfter)
         );
         try {
             ledgerClient.postEntries(txn.getTransactionId(), entries, idempotencyKey + "-ledger");
@@ -333,11 +336,11 @@ public class ConversionService {
                                        BigDecimal sourceBalanceAfterReversal, BigDecimal destBalanceAfterReversal) {
         List<LedgerLineRequest> entries = new ArrayList<>();
         if (reverseDebit) {
-            entries.add(new LedgerLineRequest(txn.getSourceWalletId(), LedgerEntryType.CREDIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfterReversal));
+            entries.add(new LedgerLineRequest(txn.getSourceAccountNo(), LedgerEntryType.CREDIT, txn.getSourceAmount(), txn.getSourceCurrency(), sourceBalanceAfterReversal));
             entries.add(new LedgerLineRequest(clearingAccountId, LedgerEntryType.DEBIT, txn.getSourceAmount(), txn.getSourceCurrency(), BigDecimal.ZERO));
         }
         if (reverseCredit) {
-            entries.add(new LedgerLineRequest(txn.getDestWalletId(), LedgerEntryType.DEBIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfterReversal));
+            entries.add(new LedgerLineRequest(txn.getDestAccountNo(), LedgerEntryType.DEBIT, txn.getDestAmount(), txn.getDestCurrency(), destBalanceAfterReversal));
             entries.add(new LedgerLineRequest(clearingAccountId, LedgerEntryType.CREDIT, txn.getDestAmount(), txn.getDestCurrency(), BigDecimal.ZERO));
         }
         String reversalTransactionId = txn.getTransactionId() + "-reversal";
@@ -362,7 +365,13 @@ public class ConversionService {
     }
 
     private void logStep(ConversionTransaction txn, String stepName, StepStatus status, String payload) {
-        stepLogRepository.save(new SagaStepLog(UUID.randomUUID().toString(), txn.getTransactionId(), stepName, status, payload));
+        logStep(txn, stepName, status, payload, null);
+    }
+
+    private void logStep(ConversionTransaction txn, String stepName, StepStatus status, String payload, String accountNo) {
+        // step_no = 2-digit running number within this saga (identifier-scheme.md).
+        String stepNo = String.format("%02d", stepLogRepository.countByTransactionId(txn.getTransactionId()) + 1);
+        stepLogRepository.save(new SagaStepLog(txn.getTransactionId(), stepNo, stepName, status, payload, accountNo));
     }
 
     private String describe(RestClientException ex) {

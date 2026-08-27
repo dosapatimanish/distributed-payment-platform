@@ -7,8 +7,8 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 public record WalletResponse(
-        String walletId,
-        String userId,
+        String accountNo,
+        String cif,
         String currency,
         BigDecimal balance,
         WalletStatus status,
@@ -18,8 +18,8 @@ public record WalletResponse(
 ) {
     public static WalletResponse from(Wallet wallet) {
         return new WalletResponse(
-                wallet.getWalletId(),
-                wallet.getUserId(),
+                wallet.getAccountNo(),
+                wallet.getCif(),
                 wallet.getCurrency(),
                 wallet.getBalance(),
                 wallet.getStatus(),

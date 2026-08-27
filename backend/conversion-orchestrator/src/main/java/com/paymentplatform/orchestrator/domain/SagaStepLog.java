@@ -5,6 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.Lob;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
@@ -12,21 +13,25 @@ import jakarta.persistence.Table;
 import java.time.Instant;
 
 /**
- * Append-only audit trail of every step attempted for a saga (design doc 6.1.3
- * {@code saga_step_log}) - one row per step attempt, written right after that step's outcome is
- * known. {@code stepName} values used by this service: {@code RATE_LOCK}, {@code DEBIT},
- * {@code CREDIT}, {@code CONSUME_LOCK}, {@code COMPENSATE_DEBIT}, {@code RELEASE_LOCK}.
+ * Append-only audit trail of every step attempted for a saga (design doc §6.1.3) - one row per
+ * step attempt. Composite PK {@code (transaction_id, step_no)}: {@code stepNo} is a 2-digit
+ * running number ({@code 01}, {@code 02}, ...) showing the step's order within its saga
+ * (identifier-scheme.md). {@code accountNo} carries the account a step acted on (source for
+ * {@code DEBIT} / {@code COMPENSATE_DEBIT}, destination for {@code CREDIT} /
+ * {@code DEBIT_FOR_PAYMENT} / {@code COMPENSATE_CREDIT}), null for steps that touch no account.
  */
 @Entity
 @Table(name = "saga_step_log")
+@IdClass(SagaStepLogId.class)
 public class SagaStepLog {
 
     @Id
-    @Column(name = "step_id", length = 36, nullable = false, updatable = false)
-    private String stepId;
-
-    @Column(name = "transaction_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String transactionId;
+
+    @Id
+    @Column(name = "step_no", length = 4, nullable = false, updatable = false)
+    private String stepNo;
 
     @Column(name = "step_name", length = 50, nullable = false, updatable = false)
     private String stepName;
@@ -35,7 +40,10 @@ public class SagaStepLog {
     @Column(name = "status", length = 20, nullable = false, updatable = false)
     private StepStatus status;
 
-    /** Request/response snapshot for audit and replay - typically the downstream call's JSON body or error message. */
+    @Column(name = "account_no", length = 12, updatable = false)
+    private String accountNo;
+
+    /** Request/response snapshot for audit - the downstream call's summary or error message. */
     @Lob
     @Column(name = "payload")
     private String payload;
@@ -46,12 +54,14 @@ public class SagaStepLog {
     protected SagaStepLog() {
     }
 
-    public SagaStepLog(String stepId, String transactionId, String stepName, StepStatus status, String payload) {
-        this.stepId = stepId;
+    public SagaStepLog(String transactionId, String stepNo, String stepName, StepStatus status,
+                        String payload, String accountNo) {
         this.transactionId = transactionId;
+        this.stepNo = stepNo;
         this.stepName = stepName;
         this.status = status;
         this.payload = payload;
+        this.accountNo = accountNo;
     }
 
     @PrePersist
@@ -59,12 +69,12 @@ public class SagaStepLog {
         this.createdAt = Instant.now();
     }
 
-    public String getStepId() {
-        return stepId;
-    }
-
     public String getTransactionId() {
         return transactionId;
+    }
+
+    public String getStepNo() {
+        return stepNo;
     }
 
     public String getStepName() {
@@ -73,6 +83,10 @@ public class SagaStepLog {
 
     public StepStatus getStatus() {
         return status;
+    }
+
+    public String getAccountNo() {
+        return accountNo;
     }
 
     public String getPayload() {

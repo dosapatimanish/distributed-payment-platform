@@ -12,25 +12,24 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * A hold placed against a wallet's balance - money the wallet has promised but not yet
- * actually moved. Deliberately holds {@code walletId} as a plain string column rather than a
- * JPA @ManyToOne association: WalletService always loads the target Wallet itself, explicitly,
- * inside whichever locking strategy (optimistic/pessimistic) it decided on - we don't want JPA
- * silently dragging the wallet in through this side.
+ * A hold placed against a wallet's balance - money the wallet has promised but not yet actually
+ * moved. Deliberately holds {@code accountNo} as a plain string column rather than a JPA
+ * {@code @ManyToOne} association: WalletService always loads the target Wallet itself,
+ * explicitly, inside whichever locking strategy (optimistic/pessimistic) it decided on.
  */
 @Entity
 @Table(name = "wallet_reservation")
 public class WalletReservation {
 
     @Id
-    @Column(name = "reservation_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "reservation_id", length = 20, nullable = false, updatable = false)
     private String reservationId;
 
-    @Column(name = "wallet_id", length = 36, nullable = false)
-    private String walletId;
+    @Column(name = "account_no", length = 12, nullable = false)
+    private String accountNo;
 
-    /** The SAGA/business transaction this hold belongs to. */
-    @Column(name = "transaction_id", length = 36, nullable = false)
+    /** The SAGA/business transaction this hold belongs to (16-digit transaction id). */
+    @Column(name = "transaction_id", length = 16, nullable = false)
     private String transactionId;
 
     @Column(name = "amount", precision = 18, scale = 4, nullable = false)
@@ -49,10 +48,10 @@ public class WalletReservation {
     protected WalletReservation() {
     }
 
-    public WalletReservation(String reservationId, String walletId, String transactionId,
+    public WalletReservation(String reservationId, String accountNo, String transactionId,
                               BigDecimal amount, ReservationStatus status, Instant expiresAt) {
         this.reservationId = reservationId;
-        this.walletId = walletId;
+        this.accountNo = accountNo;
         this.transactionId = transactionId;
         this.amount = amount;
         this.status = status;
@@ -68,8 +67,8 @@ public class WalletReservation {
         return reservationId;
     }
 
-    public String getWalletId() {
-        return walletId;
+    public String getAccountNo() {
+        return accountNo;
     }
 
     public String getTransactionId() {

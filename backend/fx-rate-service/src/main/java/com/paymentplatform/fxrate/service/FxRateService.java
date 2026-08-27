@@ -39,22 +39,32 @@ public class FxRateService {
     private final DistributedLockManager lockManager;
     private final FxRateLockRepository lockRepository;
     private final FxRateEventPublisher eventPublisher;
+    private final SequenceIds sequenceIds;
     private final Duration lockTtl;
     private final MeterRegistry meterRegistry;
 
     public FxRateService(FxRateCache cache, DistributedLockManager lockManager,
                           FxRateLockRepository lockRepository, FxRateEventPublisher eventPublisher,
+                          SequenceIds sequenceIds,
                           @Value("${fx.rate.lock.ttl-seconds}") long lockTtlSeconds,
                           MeterRegistry meterRegistry) {
         this.cache = cache;
         this.lockManager = lockManager;
         this.lockRepository = lockRepository;
         this.eventPublisher = eventPublisher;
+        this.sequenceIds = sequenceIds;
         this.lockTtl = Duration.ofSeconds(lockTtlSeconds);
         this.meterRegistry = meterRegistry;
     }
 
     public FxRateCache.RateSnapshot getCurrentRate(String base, String quote) {
+        // Identity pair (e.g. USD/USD): a same-currency "conversion" - a plain wallet-to-wallet
+        // transfer routed through the conversion saga - has a rate of exactly 1 and needs no
+        // feed entry. Without this the saga's mandatory rate-lock step fails with
+        // UNSUPPORTED_CURRENCY_PAIR, since fx.rate.pairs only lists cross-currency pairs.
+        if (base.equalsIgnoreCase(quote)) {
+            return new FxRateCache.RateSnapshot(BigDecimal.ONE, "IDENTITY", Instant.now());
+        }
         return cache.get(base, quote)
                 .orElseThrow(() -> new UnsupportedCurrencyPairException(base, quote));
     }
@@ -101,7 +111,7 @@ public class FxRateService {
             try {
                 FxRateCache.RateSnapshot current = getCurrentRate(base, quote);
                 FxRateLock lock = new FxRateLock(
-                        UUID.randomUUID().toString(), transactionId, base, quote,
+                        sequenceIds.next("fx_rate_lock_seq", "LK"), transactionId, base, quote,
                         current.rate(), amount, RateLockStatus.ACTIVE, Instant.now().plus(lockTtl));
                 try {
                     return lockRepository.save(lock);

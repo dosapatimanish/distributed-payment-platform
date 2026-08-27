@@ -41,10 +41,10 @@ public class MerchantPayment implements Persistable<String> {
     private boolean isNew = true;
 
     @Id
-    @Column(name = "payment_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "payment_id", length = 20, nullable = false, updatable = false)
     private String paymentId;
 
-    @Column(name = "transaction_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String transactionId;
 
     @Column(name = "merchant_id", nullable = false, updatable = false)

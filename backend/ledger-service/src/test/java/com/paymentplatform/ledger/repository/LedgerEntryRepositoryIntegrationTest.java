@@ -2,6 +2,7 @@ package com.paymentplatform.ledger.repository;
 
 import com.paymentplatform.ledger.domain.EntryType;
 import com.paymentplatform.ledger.domain.LedgerEntry;
+import com.paymentplatform.ledger.domain.LedgerEntryId;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -12,20 +13,15 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.oracle.OracleContainer;
 
 import java.math.BigDecimal;
-import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase.Replace.NONE;
 
 /**
- * Integration test against a real Oracle container - same pattern as wallet-service's
- * {@code WalletRepositoryIntegrationTest} (see its javadoc).
- * {@link #save_45CharReversalStyleTransactionId_fitsInTheColumn()} is a direct, permanent
- * regression test for conversion-orchestrator-implementation.md's "Bug 3" - the first live
- * compensation scenario hit "value too long for type character varying(36)" because a reversal
- * posting's {@code transactionId} ({@code {originalId}-reversal}) is 45 characters. Had this test
- * existed before that bug was hit, it would have failed immediately instead of only surfacing via
- * manual cross-service `curl` testing.
+ * Integration test against a real Oracle container. Exercises the composite PK
+ * {@code (transaction_id, entry_no)} and the wide {@code transaction_id} column a
+ * {@code -reversal} posting needs (identifier-scheme.md).
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = NONE)
@@ -39,37 +35,38 @@ class LedgerEntryRepositoryIntegrationTest {
     @Autowired
     private LedgerEntryRepository entryRepository;
 
+    private static final AtomicInteger SEQ = new AtomicInteger();
+
     private LedgerEntry sampleEntry(String transactionId) {
-        return new LedgerEntry(UUID.randomUUID().toString(), transactionId, "wallet-1", EntryType.DEBIT,
+        String entryNo = String.format("%02d", SEQ.incrementAndGet());
+        return new LedgerEntry(transactionId, entryNo, "011000000001", EntryType.DEBIT,
                 new BigDecimal("100.00"), "USD", new BigDecimal("400.00"));
     }
 
     @Test
     void save_populatesCreatedAt_onTheReturnedInstance() {
-        LedgerEntry saved = entryRepository.save(sampleEntry("it-txn-1"));
+        LedgerEntry saved = entryRepository.save(sampleEntry("0120260827000001"));
 
         assertThat(saved.getCreatedAt()).isNotNull();
     }
 
     @Test
-    void save_45CharReversalStyleTransactionId_fitsInTheColumn() {
-        String reversalStyleId = UUID.randomUUID() + "-reversal"; // 36 + 9 = 45 chars
-        assertThat(reversalStyleId).hasSize(45);
+    void save_reversalStyleTransactionId_fitsInTheColumn() {
+        String reversalId = "0120260827000001-reversal"; // 25 chars
 
-        LedgerEntry saved = entryRepository.saveAndFlush(sampleEntry(reversalStyleId));
+        LedgerEntry saved = entryRepository.saveAndFlush(sampleEntry(reversalId));
 
-        assertThat(saved.getTransactionId()).isEqualTo(reversalStyleId);
-        assertThat(entryRepository.findById(saved.getEntryId()))
+        assertThat(entryRepository.findById(new LedgerEntryId(reversalId, saved.getEntryNo())))
                 .isPresent()
                 .get()
                 .extracting(LedgerEntry::getTransactionId)
-                .isEqualTo(reversalStyleId);
+                .isEqualTo(reversalId);
     }
 
     @Test
-    void findByWalletId_returnsEntriesForThatWallet() {
-        entryRepository.save(sampleEntry("it-txn-2"));
+    void findByAccountNo_returnsEntriesForThatAccount() {
+        entryRepository.save(sampleEntry("0120260827000002"));
 
-        assertThat(entryRepository.findByWalletIdOrderByCreatedAtAsc("wallet-1")).hasSize(1);
+        assertThat(entryRepository.findByAccountNoOrderByCreatedAtAsc("011000000001")).isNotEmpty();
     }
 }

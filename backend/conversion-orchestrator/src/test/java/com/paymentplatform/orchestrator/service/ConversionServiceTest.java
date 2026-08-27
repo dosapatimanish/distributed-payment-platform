@@ -65,6 +65,9 @@ class ConversionServiceTest {
     @Mock
     private LedgerServiceClient ledgerClient;
 
+    @Mock
+    private TransactionIdGenerator transactionIdGenerator;
+
     private SimpleMeterRegistry meterRegistry;
     private ConversionService conversionService;
 
@@ -73,10 +76,11 @@ class ConversionServiceTest {
         meterRegistry = new SimpleMeterRegistry();
         conversionService = new ConversionService(
                 transactionRepository, stepLogRepository, walletClient, fxRateClient, merchantPaymentClient,
-                ledgerClient, "SYSTEM-FX-CLEARING", meterRegistry);
+                ledgerClient, transactionIdGenerator, "SC0000000000", meterRegistry);
         // save() just needs to hand back what it was given, like every other service's tests.
         // lenient: getConversion tests never call save() at all.
         lenient().when(transactionRepository.save(any(ConversionTransaction.class))).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(transactionIdGenerator.next(anyString())).thenReturn("0320260827000001");
     }
 
     private ConversionRequest sampleRequest() {
@@ -120,8 +124,8 @@ class ConversionServiceTest {
         List<LedgerLineRequest> entries = entriesCaptor.getValue();
         assertThat(entries).hasSize(4);
         assertThat(entries.get(0)).isEqualTo(new LedgerLineRequest("src-wallet", LedgerEntryType.DEBIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
-        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
-        assertThat(entries.get(2)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.DEBIT, new BigDecimal("8300.0000"), "INR", BigDecimal.ZERO));
+        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SC0000000000", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
+        assertThat(entries.get(2)).isEqualTo(new LedgerLineRequest("SC0000000000", LedgerEntryType.DEBIT, new BigDecimal("8300.0000"), "INR", BigDecimal.ZERO));
         assertThat(entries.get(3)).isEqualTo(new LedgerLineRequest("dst-wallet", LedgerEntryType.CREDIT, new BigDecimal("8300.0000"), "INR", new BigDecimal("8300.00")));
 
         // design doc 5.4's "saga state" dashboard metric - one increment per transition actually
@@ -220,7 +224,7 @@ class ConversionServiceTest {
         List<LedgerLineRequest> entries = entriesCaptor.getValue();
         assertThat(entries).hasSize(2);
         assertThat(entries.get(0)).isEqualTo(new LedgerLineRequest("src-wallet", LedgerEntryType.CREDIT, new BigDecimal("100.00"), "USD", new BigDecimal("100.00")));
-        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SYSTEM-FX-CLEARING", LedgerEntryType.DEBIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
+        assertThat(entries.get(1)).isEqualTo(new LedgerLineRequest("SC0000000000", LedgerEntryType.DEBIT, new BigDecimal("100.00"), "USD", BigDecimal.ZERO));
     }
 
     @Test

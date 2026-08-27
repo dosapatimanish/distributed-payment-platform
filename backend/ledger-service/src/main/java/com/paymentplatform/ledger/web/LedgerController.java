@@ -45,9 +45,9 @@ public class LedgerController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    @GetMapping("/wallets/{walletId}/statement")
-    public StatementResponse getStatement(@PathVariable String walletId) {
-        return new StatementResponse(walletId, toResponses(ledgerService.getStatement(walletId)));
+    @GetMapping("/wallets/{accountNo}/statement")
+    public StatementResponse getStatement(@PathVariable String accountNo) {
+        return new StatementResponse(accountNo, toResponses(ledgerService.getStatement(accountNo)));
     }
 
     private List<LedgerEntryResponse> toResponses(List<LedgerEntry> entries) {

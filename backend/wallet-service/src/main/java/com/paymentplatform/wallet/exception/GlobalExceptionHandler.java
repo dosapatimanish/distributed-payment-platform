@@ -35,6 +35,16 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", ex.getMessage(), req);
     }
 
+    @ExceptionHandler(CurrencyNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleCurrencyNotFound(CurrencyNotFoundException ex, HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, "CURRENCY_NOT_FOUND", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler(UnsupportedCurrencyException.class)
+    public ResponseEntity<ErrorResponse> handleUnsupportedCurrency(UnsupportedCurrencyException ex, HttpServletRequest req) {
+        return build(HttpStatus.valueOf(422), "UNSUPPORTED_CURRENCY", ex.getMessage(), req);
+    }
+
     @ExceptionHandler(InsufficientFundsException.class)
     public ResponseEntity<ErrorResponse> handleInsufficientFunds(InsufficientFundsException ex, HttpServletRequest req) {
         return build(HttpStatus.valueOf(422), "INSUFFICIENT_FUNDS", ex.getMessage(), req);

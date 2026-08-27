@@ -86,14 +86,14 @@ class FxRateControllerTest {
 
     @Test
     void lockRate_validRequest_returns201() throws Exception {
-        when(fxRateService.lockRate(eq("txn-1"), eq("USD"), eq("INR"), any(BigDecimal.class)))
+        when(fxRateService.lockRate(eq("0320260827000001"), eq("USD"), eq("INR"), any(BigDecimal.class)))
                 .thenReturn(activeLock());
 
         mockMvc.perform(post("/api/v1/fx/rate-lock")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"txn-1"}
+                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"0320260827000001"}
                                 """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.lockId").value("lock-1"))
@@ -105,7 +105,7 @@ class FxRateControllerTest {
         mockMvc.perform(post("/api/v1/fx/rate-lock")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"txn-1"}
+                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"0320260827000001"}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
@@ -120,7 +120,7 @@ class FxRateControllerTest {
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"txn-1"}
+                                {"baseCurrency":"USD","quoteCurrency":"INR","amount":100.00,"transactionId":"0320260827000001"}
                                 """))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_IN_PROGRESS"));
@@ -144,7 +144,7 @@ class FxRateControllerTest {
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"baseCurrency":"US","quoteCurrency":"INR","amount":100.00,"transactionId":"txn-1"}
+                                {"baseCurrency":"US","quoteCurrency":"INR","amount":100.00,"transactionId":"0320260827000001"}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));

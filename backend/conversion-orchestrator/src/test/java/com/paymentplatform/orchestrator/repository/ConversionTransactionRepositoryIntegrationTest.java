@@ -12,21 +12,17 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.oracle.OracleContainer;
 
 import java.math.BigDecimal;
-import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase.Replace.NONE;
 
 /**
- * Integration test against a real Oracle container - same pattern as wallet-service's
- * {@code WalletRepositoryIntegrationTest} (see its javadoc). Particularly worth having here
- * specifically: {@link ConversionTransaction} is the entity whose {@code createdAt}/
- * {@code updatedAt}-comes-back-null bug (see its own javadoc) was the original discovery of the
- * {@code Persistable} lesson this whole platform now applies from the start on every
- * application-assigned-id entity. {@link #save_populatesCreatedAtAndUpdatedAt_onTheReturnedInstance()}
- * is a direct, permanent regression test for that exact bug - had this test existed at the time,
- * it would have failed immediately instead of the bug being caught by a manual {@code curl}.
+ * Integration test against a real Oracle container. Regression test for the original
+ * {@code Persistable}/merge-vs-persist bug (see {@link ConversionTransaction}'s javadoc), and
+ * for the bank-style 16-char transaction_id / cif / account_no columns staying in sync with the
+ * migration.
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = NONE)
@@ -40,8 +36,12 @@ class ConversionTransactionRepositoryIntegrationTest {
     @Autowired
     private ConversionTransactionRepository transactionRepository;
 
+    private static String txnId() {
+        return String.format("%016d", ThreadLocalRandom.current().nextLong(0L, 10_000_000_000_000_000L));
+    }
+
     private ConversionTransaction sampleTransaction(String idempotencyKey) {
-        return new ConversionTransaction(UUID.randomUUID().toString(), "user-1", "src-wallet", "dst-wallet",
+        return new ConversionTransaction(txnId(), "1000000042", "011000000001", "031000000001",
                 "USD", "INR", new BigDecimal("100.00"), idempotencyKey);
     }
 
@@ -57,8 +57,8 @@ class ConversionTransactionRepositoryIntegrationTest {
     void save_duplicateIdempotencyKey_violatesRealUniqueConstraint() {
         transactionRepository.saveAndFlush(sampleTransaction("it-idem-2"));
 
-        // uk_conversion_transaction_idempotency_key (design doc §6.1.3) - proves the constraint
-        // actually exists in the migrated schema, not just declared on the entity.
+        // uk_conversion_transaction_idempotency_key - proves the constraint exists in the schema
+        // (distinct transaction ids, same idempotency key).
         assertThatThrownBy(() -> transactionRepository.saveAndFlush(sampleTransaction("it-idem-2")))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }

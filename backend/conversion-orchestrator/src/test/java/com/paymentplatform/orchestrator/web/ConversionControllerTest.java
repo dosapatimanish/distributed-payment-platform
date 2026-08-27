@@ -27,13 +27,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * Slice test: only ConversionController + GlobalExceptionHandler are loaded, ConversionService
- * and IdempotencyGuard are Mockito doubles - same shape as the other two services' controller
- * tests.
+ * and IdempotencyGuard are Mockito doubles.
  */
 @WebMvcTest(ConversionController.class)
 class ConversionControllerTest {
 
     private static final String IDEMPOTENCY_KEY = "test-key-1";
+    private static final String CIF = "1000000042";
+    private static final String SRC = "011000000001";
+    private static final String DST = "031000000001";
+    private static final String TXN = "0320260827000001";
+    private static final String BODY =
+            "{\"cif\":\"" + CIF + "\",\"sourceAccountNo\":\"" + SRC + "\",\"destAccountNo\":\"" + DST + "\","
+            + "\"sourceCurrency\":\"USD\",\"destCurrency\":\"INR\",\"sourceAmount\":100.00}";
 
     @Autowired
     private MockMvc mockMvc;
@@ -53,7 +59,7 @@ class ConversionControllerTest {
 
     private ConversionTransaction sampleTransaction(SagaState state) {
         ConversionTransaction txn = new ConversionTransaction(
-                "txn-1", "user-1", "src-wallet", "dst-wallet", "USD", "INR", new BigDecimal("100.00"), IDEMPOTENCY_KEY);
+                TXN, CIF, SRC, DST, "USD", "INR", new BigDecimal("100.00"), IDEMPOTENCY_KEY);
         txn.setSagaState(state);
         return txn;
     }
@@ -65,11 +71,9 @@ class ConversionControllerTest {
         mockMvc.perform(post("/api/v1/conversions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"userId":"user-1","sourceWalletId":"src-wallet","destWalletId":"dst-wallet","sourceCurrency":"USD","destCurrency":"INR","sourceAmount":100.00}
-                                """))
+                        .content(BODY))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.transactionId").value("txn-1"))
+                .andExpect(jsonPath("$.transactionId").value(TXN))
                 .andExpect(jsonPath("$.sagaState").value("COMPLETED"));
     }
 
@@ -77,30 +81,27 @@ class ConversionControllerTest {
     void startConversion_missingIdempotencyKey_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/conversions")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"userId":"user-1","sourceWalletId":"src-wallet","destWalletId":"dst-wallet","sourceCurrency":"USD","destCurrency":"INR","sourceAmount":100.00}
-                                """))
+                        .content(BODY))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
     }
 
     @Test
-    void startConversion_currencyNotThreeChars_returns400() throws Exception {
+    void startConversion_badAccountNumber_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/conversions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"userId":"user-1","sourceWalletId":"src-wallet","destWalletId":"dst-wallet","sourceCurrency":"US","destCurrency":"INR","sourceAmount":100.00}
-                                """))
+                        .content("{\"cif\":\"" + CIF + "\",\"sourceAccountNo\":\"src-wallet\",\"destAccountNo\":\"" + DST + "\","
+                                + "\"sourceCurrency\":\"USD\",\"destCurrency\":\"INR\",\"sourceAmount\":100.00}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
     }
 
     @Test
     void getConversion_found_returns200() throws Exception {
-        when(conversionService.getConversion("txn-1")).thenReturn(sampleTransaction(SagaState.RATE_LOCKED));
+        when(conversionService.getConversion(TXN)).thenReturn(sampleTransaction(SagaState.RATE_LOCKED));
 
-        mockMvc.perform(get("/api/v1/conversions/txn-1"))
+        mockMvc.perform(get("/api/v1/conversions/" + TXN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sagaState").value("RATE_LOCKED"));
     }

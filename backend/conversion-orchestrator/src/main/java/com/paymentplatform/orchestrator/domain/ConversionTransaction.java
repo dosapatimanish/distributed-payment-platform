@@ -17,25 +17,16 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * One conversion saga's persisted state (design doc 6.1.3 {@code conversion_transaction}) - the
- * single source of truth {@link com.paymentplatform.orchestrator.service.ConversionService}
- * reads and writes at every step, so a crash mid-saga leaves an accurate record of exactly how
- * far it got (though this pass does not yet implement crash-recovery/resume - see
- * implementation notes).
+ * One conversion saga's persisted state (design doc §6.1.3). Single source of truth
+ * {@link com.paymentplatform.orchestrator.service.ConversionService} reads and writes at every
+ * step. {@code transactionId} is a 16-char bank-style id
+ * ({@code [source-currency short_code 2][business date YYYYMMDD 8][daily sequence 6]}) minted by
+ * {@code TransactionIdGenerator} - see backend-documents/identifier-scheme.md.
  *
- * Implements {@link Persistable} because {@code transactionId} is an application-assigned UUID,
- * not {@code @GeneratedValue}: without this, Spring Data JPA's default "is this new?" check
- * (no {@code @Version} field here, unlike {@code Wallet}) falls back to "is the id null?", which
- * is always false the instant the constructor below runs - so every {@code save()} call,
- * including the very first one, would look like an update to an existing row and go through
- * {@code merge()} instead of {@code persist()}. {@code merge()} returns a *different* managed
- * instance with the DB-computed fields (like {@code createdAt}, set by {@code @PrePersist})
- * populated on it - the original object passed to {@code save()} never gets those fields filled
- * in. This bit in practice: the very first response from {@code POST /conversions} showed
- * {@code createdAt}/{@code updatedAt} as {@code null}, even though a subsequent {@code GET}
- * on the same transaction showed them populated correctly (a fresh DB read, unaffected by which
- * in-memory object had stale fields). {@code isNew} here makes the new-vs-existing decision
- * explicit and correct regardless of the pre-assigned id.
+ * Implements {@link Persistable} because {@code transactionId} is application-assigned, not
+ * {@code @GeneratedValue}, and there is no {@code @Version} field: {@code isNew} makes the
+ * new-vs-existing decision explicit so the first {@code save()} goes through {@code persist()}
+ * (which fills {@code @PrePersist} fields on the passed instance), not {@code merge()}.
  */
 @Entity
 @Table(
@@ -48,17 +39,17 @@ public class ConversionTransaction implements Persistable<String> {
     private boolean isNew = true;
 
     @Id
-    @Column(name = "transaction_id", length = 36, nullable = false, updatable = false)
+    @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String transactionId;
 
-    @Column(name = "user_id", nullable = false, updatable = false)
-    private String userId;
+    @Column(name = "cif", length = 10, nullable = false, updatable = false)
+    private String cif;
 
-    @Column(name = "source_wallet_id", nullable = false, updatable = false)
-    private String sourceWalletId;
+    @Column(name = "source_account_no", length = 12, nullable = false, updatable = false)
+    private String sourceAccountNo;
 
-    @Column(name = "dest_wallet_id", nullable = false, updatable = false)
-    private String destWalletId;
+    @Column(name = "dest_account_no", length = 12, nullable = false, updatable = false)
+    private String destAccountNo;
 
     @Column(name = "source_currency", length = 3, nullable = false, updatable = false)
     private String sourceCurrency;
@@ -77,7 +68,7 @@ public class ConversionTransaction implements Persistable<String> {
     @Column(name = "locked_rate", precision = 18, scale = 8)
     private BigDecimal lockedRate;
 
-    /** Null until {@link SagaState#RATE_LOCKED}; fx-rate-service's lock id, needed to consume/release it later. */
+    /** Null until {@link SagaState#RATE_LOCKED}; fx-rate-service's lock id. */
     @Column(name = "fx_lock_id", length = 36)
     private String fxLockId;
 
@@ -97,13 +88,13 @@ public class ConversionTransaction implements Persistable<String> {
     protected ConversionTransaction() {
     }
 
-    public ConversionTransaction(String transactionId, String userId, String sourceWalletId, String destWalletId,
+    public ConversionTransaction(String transactionId, String cif, String sourceAccountNo, String destAccountNo,
                                   String sourceCurrency, String destCurrency, BigDecimal sourceAmount,
                                   String idempotencyKey) {
         this.transactionId = transactionId;
-        this.userId = userId;
-        this.sourceWalletId = sourceWalletId;
-        this.destWalletId = destWalletId;
+        this.cif = cif;
+        this.sourceAccountNo = sourceAccountNo;
+        this.destAccountNo = destAccountNo;
         this.sourceCurrency = sourceCurrency;
         this.destCurrency = destCurrency;
         this.sourceAmount = sourceAmount;
@@ -124,7 +115,6 @@ public class ConversionTransaction implements Persistable<String> {
         this.updatedAt = Instant.now();
     }
 
-    /** Entities loaded from the DB (as opposed to newly constructed) are never "new". */
     @PostLoad
     void onLoad() {
         this.isNew = false;
@@ -144,16 +134,16 @@ public class ConversionTransaction implements Persistable<String> {
         return transactionId;
     }
 
-    public String getUserId() {
-        return userId;
+    public String getCif() {
+        return cif;
     }
 
-    public String getSourceWalletId() {
-        return sourceWalletId;
+    public String getSourceAccountNo() {
+        return sourceAccountNo;
     }
 
-    public String getDestWalletId() {
-        return destWalletId;
+    public String getDestAccountNo() {
+        return destAccountNo;
     }
 
     public String getSourceCurrency() {
