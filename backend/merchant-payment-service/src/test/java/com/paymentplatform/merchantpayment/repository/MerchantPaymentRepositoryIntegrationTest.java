@@ -10,7 +10,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.dao.DataIntegrityViolationException;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.oracle.OracleContainer;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase.Replace.NONE;
 
 /**
- * Integration test against a real Postgres container - same pattern as wallet-service's
+ * Integration test against a real Oracle container - same pattern as wallet-service's
  * {@code WalletRepositoryIntegrationTest} (see its javadoc). {@link MerchantPayment} applied the
  * {@code Persistable} lesson from the start (see its own javadoc), so
  * {@link #save_populatesCreatedAtAndUpdatedAt_onTheReturnedInstance()} here confirms that held up
@@ -33,7 +33,7 @@ class MerchantPaymentRepositoryIntegrationTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static OracleContainer oracle = new OracleContainer("gvenzl/oracle-free:23-slim");
 
     @Autowired
     private MerchantPaymentRepository paymentRepository;

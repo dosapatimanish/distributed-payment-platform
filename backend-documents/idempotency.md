@@ -160,7 +160,7 @@ valid amount succeeds, rather than replaying the 422 forever.
 
 One shared `redis` container (`backend/docker-compose.yml`), not one per service — matches the
 design doc's system block diagram, which groups Redis with shared platform infrastructure
-(alongside Oracle/Postgres-per-service being the thing that *is* owned per service). Each
+(alongside Oracle-per-service being the thing that *is* owned per service). Each
 service prefixes its keys (`wallet:idem:` / `fxrate:idem:`) so the same key value used by two
 different clients against two different services can never collide.
 

@@ -8,7 +8,7 @@ info:
   version: "1.0.0"
 servers:
   - url: http://localhost:8081
-    description: Local (docker-compose Postgres)
+    description: Local (shared docker-compose Oracle platform-oracle on host port 1521, schema wallet_app)
 
 tags:
   - name: Wallets

@@ -1,95 +1,35 @@
 services:
-  wallet-postgres:
-    image: postgres:16-alpine
-    container_name: wallet-postgres
+  # One shared Oracle Database Free 23ai instance for all 5 services - schema-per-service, not
+  # a separate container per service (5 gvenzl/oracle-free instances need ~8-10 GB RAM and don't
+  # fit a typical dev laptop; one instance is ~2 GB). One pluggable DB (ORACLE_DATABASE=paymentdb,
+  # host port 1521); the init script below creates one Oracle user per service (wallet_app,
+  # fxrate_app, orchestrator_app, payment_app, ledger_app), each owning its own schema and its
+  # own flyway_schema_history. healthcheck.sh ships in the image.
+  platform-oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: platform-oracle
     environment:
-      POSTGRES_DB: wallet_db
-      POSTGRES_USER: wallet_app
-      POSTGRES_PASSWORD: wallet_app_pw
+      ORACLE_PASSWORD: platform_admin_pw
+      ORACLE_DATABASE: paymentdb
     ports:
-      - "5432:5432"
+      - "1521:1521"
     volumes:
-      - wallet_postgres_data:/var/lib/postgresql/data
+      - platform_oracle_data:/opt/oracle/oradata
+      # First-boot only: *.sql here run against the paymentdb PDB as SYSTEM (no APP_USER set).
+      - ./oracle-init:/container-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wallet_app -d wallet_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  fxrate-postgres:
-    image: postgres:16-alpine
-    container_name: fxrate-postgres
-    environment:
-      POSTGRES_DB: fxrate_db
-      POSTGRES_USER: fxrate_app
-      POSTGRES_PASSWORD: fxrate_app_pw
-    ports:
-      # Host port 5435, not 5432 - runs alongside wallet-postgres without clashing.
-      - "5435:5432"
-    volumes:
-      - fxrate_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fxrate_app -d fxrate_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  orchestrator-postgres:
-    image: postgres:16-alpine
-    container_name: orchestrator-postgres
-    environment:
-      POSTGRES_DB: saga_db
-      POSTGRES_USER: orchestrator_app
-      POSTGRES_PASSWORD: orchestrator_app_pw
-    ports:
-      # Host port 5436 - 5432/5433/5434/5435 already taken locally.
-      - "5436:5432"
-    volumes:
-      - orchestrator_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U orchestrator_app -d saga_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  payment-postgres:
-    image: postgres:16-alpine
-    container_name: payment-postgres
-    environment:
-      POSTGRES_DB: payment_db
-      POSTGRES_USER: payment_app
-      POSTGRES_PASSWORD: payment_app_pw
-    ports:
-      # Host port 5437 - 5432/5433/5434/5435/5436 already taken locally.
-      - "5437:5432"
-    volumes:
-      - payment_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U payment_app -d payment_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  ledger-postgres:
-    image: postgres:16-alpine
-    container_name: ledger-postgres
-    environment:
-      POSTGRES_DB: ledger_db
-      POSTGRES_USER: ledger_app
-      POSTGRES_PASSWORD: ledger_app_pw
-    ports:
-      # Host port 5438 - 5432/5433/5434/5435/5436/5437 already taken locally.
-      - "5438:5432"
-    volumes:
-      - ledger_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledger_app -d ledger_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      # Not gvenzl's healthcheck.sh - that goes green as soon as the CDB is open, which on first
+      # boot is *before* oracle-init/ has created the per-service users, so an app container
+      # could start and hit ORA-01017. Instead: log in as ledger_app (the last user the init
+      # script creates) against the paymentdb service. Passes only once init has fully run.
+      test: ["CMD-SHELL", "echo 'SELECT 1;' | sqlplus -s -L ledger_app/ledger_app_pw@//localhost:1521/paymentdb | grep -q '^[[:space:]]*1[[:space:]]*$'"]
+      interval: 10s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
 
   # Shared platform infra (design doc's system diagram groups Redis with the shared
-  # infrastructure, not owned per-service like Postgres) - both wallet-service and
+  # infrastructure, not owned per-service like Oracle) - both wallet-service and
   # fx-rate-service connect to this one instance for Idempotency-Key storage, each under its
   # own key prefix (wallet:idem: / fxrate:idem:) so the two services can't collide.
   redis:
@@ -141,20 +81,21 @@ services:
   # Each still runs equally well on the host via `./mvnw spring-boot:run` (see its own
   # implementation notes) - these containers override the same properties via environment
   # variables (Spring Boot's standard relaxed-binding env-var precedence), the application.
-  # properties files themselves are untouched. depends_on + condition: service_healthy on each
-  # service's own Postgres (and Redis) means a container won't even attempt to start before its
-  # datasource is actually ready to accept connections.
+  # properties files themselves are untouched. depends_on + condition: service_healthy on the
+  # shared platform-oracle (and Redis) means a container won't even attempt to start before its
+  # datasource is actually ready to accept connections. All 5 point at the same instance
+  # (//platform-oracle:1521/paymentdb) but connect as their own user - see application.properties.
   wallet-service:
     build: ./wallet-service
     container_name: wallet-service
     ports:
       - "8081:8081"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://wallet-postgres:5432/wallet_db
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@//platform-oracle:1521/paymentdb
       SPRING_DATA_REDIS_HOST: redis
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     depends_on:
-      wallet-postgres:
+      platform-oracle:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -167,11 +108,11 @@ services:
     ports:
       - "8082:8082"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://fxrate-postgres:5432/fxrate_db
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@//platform-oracle:1521/paymentdb
       SPRING_DATA_REDIS_HOST: redis
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     depends_on:
-      fxrate-postgres:
+      platform-oracle:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -184,11 +125,11 @@ services:
     ports:
       - "8084:8084"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://payment-postgres:5432/payment_db
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@//platform-oracle:1521/paymentdb
       SPRING_DATA_REDIS_HOST: redis
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     depends_on:
-      payment-postgres:
+      platform-oracle:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -201,10 +142,10 @@ services:
     ports:
       - "8085:8085"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_db
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@//platform-oracle:1521/paymentdb
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
-      ledger-postgres:
+      platform-oracle:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -221,14 +162,14 @@ services:
     ports:
       - "8083:8083"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://orchestrator-postgres:5432/saga_db
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@//platform-oracle:1521/paymentdb
       SPRING_DATA_REDIS_HOST: redis
       ORCHESTRATOR_WALLET_SERVICE_BASE_URL: http://wallet-service:8081
       ORCHESTRATOR_FX_RATE_SERVICE_BASE_URL: http://fx-rate-service:8082
       ORCHESTRATOR_MERCHANT_PAYMENT_SERVICE_BASE_URL: http://merchant-payment-service:8084
       ORCHESTRATOR_LEDGER_SERVICE_BASE_URL: http://ledger-service:8085
     depends_on:
-      orchestrator-postgres:
+      platform-oracle:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -278,10 +219,6 @@ services:
       - prometheus
 
 volumes:
-  wallet_postgres_data:
-  fxrate_postgres_data:
-  orchestrator_postgres_data:
-  payment_postgres_data:
-  ledger_postgres_data:
+  platform_oracle_data:
   redis_data:
   grafana_data:

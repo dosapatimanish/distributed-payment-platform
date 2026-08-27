@@ -174,7 +174,7 @@ This proves the publishing logic is correct given whatever `KafkaTemplate` does 
 prove events actually arrive at a real broker, survive a restart, or preserve partition ordering
 under real concurrent load. That was verified once, manually, against a real broker (see below);
 it is not covered by the automated suite, which is a Testcontainers-shaped gap same as the
-Postgres/Redis ones already tracked in `testing-guide.md`.
+Oracle/Redis ones already tracked in `testing-guide.md`.
 
 ## Manually verified (against a real broker)
 

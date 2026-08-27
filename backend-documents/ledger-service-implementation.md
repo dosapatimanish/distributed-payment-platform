@@ -7,7 +7,9 @@ them together — not yet called by conversion-orchestrator (see What's next).
 ## What this step built
 
 The Ledger Service, as a standalone Spring Boot 4.1.1 (Java 25) module on port `:8085`, backed
-by its own PostgreSQL database (`ledger_db`):
+by its own `ledger_app` schema in the one shared Oracle Database Free 23ai instance
+(`platform-oracle`, host port `1521`, `paymentdb` PDB; originally PostgreSQL, migrated — see
+[oracle-migration.md](oracle-migration.md)):
 
 - `POST /api/v1/ledger/entries` — record one double-entry posting (every line for a
   `transactionId`, written atomically).
@@ -29,8 +31,9 @@ by its own PostgreSQL database (`ledger_db`):
 | ~~Cross-currency double-entry netting~~ | **Done.** Resolved with a synthetic FX clearing account, not a validator change — see conversion-orchestrator-implementation.md's "Third pass" section for the full reasoning. `DoubleEntryValidator` itself needed no code changes at all. |
 | Kafka events | The design doc's topic table (§6.5) has no ledger-originated topic — this service is the sink other services' events eventually feed (indirectly, via the orchestrator calling it), not a publisher itself. No `spring-kafka` dependency pulled in at all for this service. |
 | Transactional Outbox | Same category as the other four services' deferred Outbox — moot here anyway since there's no event to publish (see above). |
-| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `LedgerEntryRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for Bug 3's `VARCHAR(64)` column width. Real Redis/Kafka Testcontainers still deferred (this service has no Kafka producer anyway). |
-| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). |
+| ~~Testcontainers integration tests~~ | **Done** (Oracle, `gvenzl/oracle-free:23-slim`) — `LedgerEntryRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for Bug 3's `VARCHAR2(64)` column width. Real Redis/Kafka Testcontainers still deferred (this service has no Kafka producer anyway). |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql` (Oracle DDL since the migration), `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section); per-database module is `flyway-database-oracle` now. |
+| ~~Oracle~~ | **Done** — Postgres → Oracle Database Free 23ai, platform-wide. See [oracle-migration.md](oracle-migration.md). |
 | Pagination on `getStatement` | Every entry for a wallet is returned in one response — fine at this project's scale, would need cursor/offset pagination for a real high-volume wallet. |
 
 ## Package layout
@@ -92,7 +95,7 @@ on the very first `curl` response, first try.
 ## Automated tests
 
 27 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
-Testcontainers integration test class against a real Postgres for the persistence layer.
+Testcontainers integration test class against a real Oracle for the persistence layer.
 
 - **`DoubleEntryValidatorTest`** (6 tests) — pure unit tests, no mocks needed (same category as
   `SagaStateMachineTest` in testing-guide.md). Covers a balanced same-currency pair, an empty
@@ -110,23 +113,24 @@ Testcontainers integration test class against a real Postgres for the persistenc
   `INVALID_LEDGER_ENTRIES`, `LEDGER_CONFLICT`, and both a populated and an empty statement.
 - **`IdempotencyGuardTest`** (7 tests) — identical structure to the other four services' own.
 - **`LedgerEntryRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
-  `postgres:16-alpine` Testcontainers container, Flyway-migrated. The direct regression test for
-  Bug 3's `VARCHAR(64)` column width - saves an entry under a real 45-char reversal-style
-  `transactionId` and confirms it round-trips intact; also `createdAt` populated on `save()`'s
-  return, `findByWalletIdOrderByCreatedAtAsc`.
+  `gvenzl/oracle-free:23-slim` Testcontainers container, Flyway-migrated. The direct regression
+  test for Bug 3's `VARCHAR2(64)` column width - saves an entry under a real 45-char
+  reversal-style `transactionId` and confirms it round-trips intact; also `createdAt` populated
+  on `save()`'s return, `findByWalletIdOrderByCreatedAtAsc`.
 
 ## Schema notes
 
-- `entry_id` is an app-generated `UUID.randomUUID().toString()`, `VARCHAR(36)` — same
-  portability reasoning as every other entity in this platform.
-- `transaction_id` is `VARCHAR(64)`, not `VARCHAR(36)` — wider than the design doc's literal
+- `entry_id` is an app-generated `UUID.randomUUID().toString()`, `VARCHAR2(36)` — same
+  portability reasoning as every other entity in this platform (and what made the Oracle
+  migration a dialect change, not a rewrite).
+- `transaction_id` is `VARCHAR2(64)`, not `VARCHAR2(36)` — wider than the design doc's literal
   `VARCHAR2(36)` (§6.1.5) and every other UUID-holding column in this platform. Widened after a
   real bug: conversion-orchestrator's compensation path posts a reversal under
   `{originalTransactionId}-reversal` (36 + 9 = 45 chars), which the original 36-char column
   rejected outright with a `value too long` error the first time a live compensation scenario
   actually reached it. See conversion-orchestrator-implementation.md's "Bug 3" for the full
   story — caught by manual cross-service verification, not by either service's unit tests
-  (ledger-service's own tests mock the repository, so a real Postgres column-length constraint
+  (ledger-service's own tests mock the repository, so a real DB column-length constraint
   never enters the picture).
 - Indexes on `transaction_id` and `wallet_id` (design doc §6.1.5) — the two columns every query
   in this service filters by (`existsByTransactionId`, `findByWalletIdOrderByCreatedAtAsc`).
@@ -138,16 +142,17 @@ Testcontainers integration test class against a real Postgres for the persistenc
 
 ```bash
 cd backend
-docker compose up -d ledger-postgres redis
+docker compose up -d platform-oracle redis
 cd ledger-service && ./mvnw spring-boot:run   # :8085
 ```
 
-ledger-postgres publishes on host port **5438** (5432/5433/5434/5435/5436/5437 already taken
-locally) — see `backend/docker-compose.yml`.
+The shared `platform-oracle` instance is on host port **1521** (`paymentdb` PDB); this service
+connects as `ledger_app` — see `backend/docker-compose.yml` and `backend/oracle-init/`.
+`gvenzl/oracle-free:23-slim` takes ~2–4 min to become healthy on first boot (creates the per-service users then).
 
 ## Verification performed
 
-All done manually via `curl` against real Postgres and Redis:
+All done manually via `curl` against real Oracle and Redis:
 
 1. **Balanced posting**: `POST /ledger/entries` with a matched USD DEBIT/CREDIT pair → `201`,
    both lines back with `entryId`s and correctly populated `createdAt` (the `Persistable` fix,

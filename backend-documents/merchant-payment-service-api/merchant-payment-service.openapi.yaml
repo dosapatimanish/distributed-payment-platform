@@ -9,7 +9,7 @@ info:
   version: "1.0.0"
 servers:
   - url: http://localhost:8084
-    description: Local (docker-compose Postgres, payment-postgres on host port 5437)
+    description: Local (shared docker-compose Oracle platform-oracle on host port 1521, schema payment_app)
 
 tags:
   - name: Payments

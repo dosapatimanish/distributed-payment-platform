@@ -89,7 +89,7 @@ Fully auto-provisioned, no manual setup — `backend/observability/grafana/`:
 ```bash
 cd backend
 docker compose up -d prometheus grafana
-# ... plus the usual Postgres/Redis/Kafka containers and all 5 services, see the root README
+# ... plus the usual Oracle/Redis/Kafka containers and all 5 services, see the root README
 ```
 
 - Prometheus UI: http://localhost:9090 (Status → Targets should show all 5 services `UP`)

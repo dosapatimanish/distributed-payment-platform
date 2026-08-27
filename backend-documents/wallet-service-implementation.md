@@ -6,7 +6,10 @@ Written after the code was built and manually verified, as a reference for futur
 ## What this step built
 
 The Wallet Service, as a standalone Spring Boot 4.1.1 (Java 25) module, backed by real
-PostgreSQL persistence:
+Oracle Database Free 23ai persistence — its own `wallet_app` schema in the one shared
+`platform-oracle` instance (host port 1521, `paymentdb` PDB). Originally built on PostgreSQL 16;
+migrated to Oracle — see [oracle-migration.md](oracle-migration.md), including why it's one
+shared instance and not a container per service.
 
 - Wallet CRUD: create, get balance, debit, credit.
 - Reservations (holds): reserve → capture (performs the real debit) or release (frees the hold,
@@ -23,10 +26,10 @@ PostgreSQL persistence:
 | ~~Kafka event publishing~~ | **Done** — see [Kafka Events](#kafka-events) below. |
 | ~~Redis-backed `Idempotency-Key` handling~~ | **Done** — see [Idempotency-Key](#idempotency-key) below. |
 | Transactional Outbox pattern | Only meaningful once there's a Kafka publish step to make reliable. |
-| Oracle | Postgres is free, Docker-friendly, and close enough in SQL/locking semantics (including `SELECT ... FOR UPDATE`) to develop against. The schema was kept Oracle-portable on purpose (see below) so the eventual migration is a config/dialect change, not a rewrite. |
+| ~~Oracle~~ | **Done** — migrated from Postgres 16 to Oracle Database Free 23ai (`gvenzl/oracle-free:23-slim`), all 5 services. The schema was kept Oracle-portable from the start, so this was a config/dialect/DDL change, not a rewrite. See [oracle-migration.md](oracle-migration.md) for what changed and the four issues it surfaced. |
 | ~~Automated tests~~ | **Done** — see [Automated tests](#automated-tests) below. Was explicit user request to defer for the initial build; verified manually with `curl` instead at the time. |
 | ~~Flyway/Liquibase migrations~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. See Schema notes below. |
-| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `WalletRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Testcontainers integration tests~~ | **Done** (Oracle, `gvenzl/oracle-free:23-slim`) — `WalletRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
 
 ## Package layout
 
@@ -133,7 +136,7 @@ pattern for how it's tested without a real Redis.
 
 **Shared Redis instance**: one `redis` container (`backend/docker-compose.yml`) serves both
 wallet-service and fx-rate-service - matches the design doc's system diagram, which groups
-Redis with shared platform infra rather than owning it per-service like Postgres. Each service
+Redis with shared platform infra rather than owning it per-service like Oracle. Each service
 prefixes its keys (`wallet:idem:` / `fxrate:idem:`) so they can't collide.
 
 ## Kafka Events
@@ -171,7 +174,7 @@ inferring it from log volume.
 ## Automated tests
 
 57 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
-Testcontainers integration test class against a real Postgres for the persistence layer (real
+Testcontainers integration test class against a real Oracle for the persistence layer (real
 Redis/Kafka Testcontainers still deferred — see testing-guide.md's "Scope decision").
 
 - **`WalletServiceTest`** (25 tests) — Mockito doubles for `WalletRepository`,
@@ -201,10 +204,10 @@ Redis/Kafka Testcontainers still deferred — see testing-guide.md's "Scope deci
   `CompletableFuture` from `kafkaTemplate.send(...)` never propagates out of the publisher (see
   kafka-events.md).
 - **`WalletRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
-  `postgres:16-alpine` Testcontainers container, Flyway's `V1__init.sql` migrating it at context
-  startup exactly like production. Proves `save()`'s returned instance has `createdAt`/
-  `updatedAt` populated, `uk_wallet_user_currency` is really enforced by Postgres (not just
-  declared on the entity), and a `findById` round-trip preserves `NUMERIC(18,4)` precision.
+  `gvenzl/oracle-free:23-slim` Testcontainers container, Flyway's `V1__init.sql` migrating it at
+  context startup exactly like production. Proves `save()`'s returned instance has `createdAt`/
+  `updatedAt` populated, `uk_wallet_user_currency` is really enforced by Oracle (not just
+  declared on the entity), and a `findById` round-trip preserves `NUMBER(18,4)` precision.
 
 **Mocking `PlatformTransactionManager`**: `WalletService` builds its own `TransactionTemplate`
 in the constructor (see the self-invocation section above) rather than using `@Transactional`,
@@ -221,7 +224,7 @@ is still exercised for real, just without an actual transaction underneath it. T
 `Wallet` instance across all retry attempts (`when(walletRepository.findById(...)).thenReturn(...)`
 returning the same object every call). Since `debitMutation` mutates the entity in place, the
 balance kept compounding across attempts (100 → 90 → 80 → 70) even though two of those three
-"transactions" were supposed to have failed and rolled back. Real Postgres wouldn't do this — a
+"transactions" were supposed to have failed and rolled back. A real database wouldn't do this — a
 failed commit rolls back, so the next `findById` re-reads the actually-committed balance,
 unchanged. Fix: `thenAnswer(...)` returning a **fresh** `Wallet` object on every call, so each
 retry attempt starts from the real committed state, the way a fresh `SELECT` would.
@@ -229,8 +232,8 @@ retry attempt starts from the real committed state, the way a fresh `SELECT` wou
 ## Schema notes
 
 - `wallet_id` / `reservation_id` are app-generated `UUID.randomUUID().toString()` values stored
-  as `VARCHAR(36)`, not a Postgres-native `uuid` column — kept portable for the later Oracle
-  migration.
+  as `VARCHAR(36)` (`VARCHAR2(36)` on Oracle), not a native `uuid` / `RAW(16)` column — this is
+  what kept the Oracle migration a dialect change rather than a rewrite.
 - `balance` / `amount` are `BigDecimal` at precision 18, scale 4, matching the design doc's
   `NUMBER(18,4)`. `balance >= 0` is enforced in `WalletService`, not a DB `CHECK` constraint
   (Hibernate's `ddl-auto=update` doesn't manage those reliably across dialects).
@@ -239,9 +242,13 @@ retry attempt starts from the real committed state, the way a fresh `SELECT` wou
   chose, never implicitly through a lazy association.
 - Schema is now Flyway-owned: `db/migration/V1__init.sql` reproduces exactly what
   `ddl-auto=update` had already generated (same tables/columns/indexes/constraints, not
-  redesigned), and `ddl-auto` is now `validate`. Verified by wiping both Postgres volumes and
+  redesigned), and `ddl-auto` is now `validate`. Verified by wiping both DB volumes and
   Docker images and confirming Flyway builds the schema from empty and Hibernate validates
   against it cleanly — see the Docker gotcha above for the one real bug this surfaced.
+- The `V1__init.sql` is now Oracle DDL (`VARCHAR2`, `NUMBER`, native `BOOLEAN` for
+  `high_contention`). The Postgres → Oracle type mapping and the `ddl-auto=validate` trap the
+  `BOOLEAN` column would have hit if mapped as `NUMBER(1)` are in
+  [oracle-migration.md](oracle-migration.md) (Issue 1).
 
 ## Spring Boot 4.1.1 gotchas hit along the way
 
@@ -282,7 +289,7 @@ recorded here rather than left to be rediscovered:
   plain `StringSerializer` and does its own JSON encoding with the app's Jackson 3
   `ObjectMapper` instead (see kafka-events.md).
 - **Flyway autoconfiguration is a separate starter, not bundled with `flyway-core`.** Adding
-  `flyway-core` + `flyway-database-postgresql` alone compiles fine but Flyway never actually
+  `flyway-core` + the per-database module alone compiles fine but Flyway never actually
   runs at startup - no log line, no `flyway_schema_history` table, and Hibernate's
   `ddl-auto=validate` then fails with "missing table" against an empty database, silently
   (no Flyway error to explain why). The class that wires Flyway into Spring Boot's startup isn't
@@ -292,14 +299,16 @@ recorded here rather than left to be rediscovered:
   artifact, found by grepping `spring-boot-dependencies`' own BOM for "flyway" and noticing a
   `spring-boot-starter-flyway` entry instead of the classic bare `flyway-core` approach older
   Boot versions used. Fixed by depending on that starter instead (it pulls in `flyway-core`
-  itself); `flyway-database-postgresql` is still needed alongside it for Postgres support
-  specifically (Flyway 10+ split per-database support out of `flyway-core`).
+  itself); a per-database module is still needed alongside it (Flyway 10+ split per-database
+  support out of `flyway-core`) - `flyway-database-oracle` since the Oracle migration
+  (`flyway-database-postgresql` before it). Same silent no-op if the module doesn't match the
+  actual DB - see [oracle-migration.md](oracle-migration.md) Issue 3.
 
 ## How to run it locally
 
 ```bash
 cd backend
-docker compose up -d wallet-postgres redis kafka   # this service's Postgres + shared Redis + shared Kafka
+docker compose up -d platform-oracle redis kafka   # shared Oracle (host :1521, connects as wallet_app) + shared Redis + shared Kafka
 
 cd wallet-service
 ./mvnw spring-boot:run        # starts the service on :8081
@@ -354,11 +363,12 @@ All done manually via `curl` (automated tests deferred, see above):
 
 ## What's next
 
-- ~~Testcontainers integration tests against real Postgres~~ — **Done**, for the unique
-  constraint and `Persistable`-shape assertions (see Automated tests above). Still deferred: a
-  real-Postgres test of `SELECT ... FOR UPDATE`/`@Version` conflicts under genuine concurrent
-  load, and real Redis (the idempotency guard's `SETNX` race) / real Kafka (partition-key
-  ordering) Testcontainers tests.
+- ~~Testcontainers integration tests against a real database~~ — **Done** (now Oracle, see
+  Automated tests above and [oracle-migration.md](oracle-migration.md)), for the unique
+  constraint and `Persistable`-shape assertions. Still deferred: a real-DB test of
+  `SELECT ... FOR UPDATE`/`@Version` conflicts under genuine concurrent load, and real Redis
+  (the idempotency guard's `SETNX` race) / real Kafka (partition-key ordering) Testcontainers
+  tests.
 - Transactional Outbox pattern, now that there's a Kafka publish step to make reliable (see
   kafka-events.md's "Deliberate simplification: no outbox, no delivery guarantee").
 - Eventual Oracle migration (schema was kept portable for exactly this).

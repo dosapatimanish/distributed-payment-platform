@@ -11,17 +11,18 @@ actually in `WalletServiceTest`, `WalletControllerTest`, `FxRateServiceTest`,
 
 All five services now have **two layers of automated test**, deliberately scoped differently:
 
-| | Unit tests (Mockito) | Testcontainers integration tests (real Postgres) |
+| | Unit tests (Mockito) | Testcontainers integration tests (real Oracle) |
 |---|---|---|
 | Speed | ~2-6s per module | ~7s per module (one real container, reused across that class's tests) |
 | Needs Docker at test time | No | Yes |
 | Proves | Business logic, validation, error mapping — the code's own decisions given assumed collaborator behavior | The migrated schema (Flyway's `V1__init.sql`) actually matches the entity mappings; unique/check constraints are real, not just declared; `save()` returns an instance with DB-computed fields populated |
 
 The unit tests **simulate** DB behavior (e.g. feeding a mocked repository a scripted sequence of
-`ObjectOptimisticLockingFailureException`s) rather than proving Postgres itself does what the
+`ObjectOptimisticLockingFailureException`s) rather than proving the database itself does what the
 code assumes. Pattern 6 below closes that gap for the persistence layer specifically — one
-`@DataJpaTest` + real `PostgreSQLContainer` class per service, exercising each entity's own
-repository against a real, Flyway-migrated database.
+`@DataJpaTest` + real `OracleContainer` class per service, exercising each entity's own
+repository against a real, Flyway-migrated database. (The containers ran `PostgreSQLContainer`
+before the Oracle migration — see [oracle-migration.md](oracle-migration.md).)
 
 **Still deferred**: Redis's `SETNX` race and Kafka's actual publish/ordering behavior aren't
 covered by Testcontainers yet — `IdempotencyGuardTest` and the event-publisher tests still mock
@@ -35,7 +36,7 @@ this one.
 faithful to what a mock *should* do, but not to what Hibernate's real `merge()` path actually
 does for an entity with a manually-assigned id and no `@Version` field (it returns a *different*
 object with DB-computed fields populated, not the same instance mutated in place). The mocked
-test suite passed the whole time; only a real-Postgres manual `curl` test caught that
+test suite passed the whole time; only a real-database manual `curl` test caught that
 `createdAt`/`updatedAt` came back `null` on the live response. See
 conversion-orchestrator-implementation.md's "A real bug this caught: `Persistable` and
 manually-assigned entity IDs" for the full story and fix - worth reading before adding another
@@ -298,9 +299,9 @@ its DB work. Skipping it would leave that guarantee undocumented and unverified.
 Same caveat as Pattern 4: this proves the publisher's own logic, not that a real broker
 actually receives, persists, or orders these messages correctly. That was verified once
 manually against a real broker instead (see kafka-events.md) - still a Testcontainers-shaped
-gap in the automated suite, same category as the Postgres/Redis ones.
+gap in the automated suite, same category as the Oracle/Redis ones.
 
-## Pattern 6 — repository integration test against a real Postgres container
+## Pattern 6 — repository integration test against a real Oracle container
 
 ```java
 @DataJpaTest
@@ -310,7 +311,7 @@ class WalletRepositoryIntegrationTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static OracleContainer oracle = new OracleContainer("gvenzl/oracle-free:23-slim");
 
     @Autowired
     private WalletRepository walletRepository;
@@ -334,12 +335,15 @@ class WalletRepositoryIntegrationTest {
 ```
 
 `@DataJpaTest` + `@AutoConfigureTestDatabase(replace = NONE)` + `@Testcontainers` +
-`@ServiceConnection` on a `@Container static PostgreSQLContainer` is the whole setup - Spring
+`@ServiceConnection` on a `@Container static OracleContainer` is the whole setup - Spring
 Boot wires the container's real JDBC URL into the test context automatically (no manual
 `@DynamicPropertySource` needed), Flyway's `V1__init.sql` runs against it at context startup
 exactly like production does, and `@AutoConfigureTestDatabase(replace = NONE)` stops
 `@DataJpaTest`'s default behavior of trying to swap in an embedded database this project doesn't
-have (no H2 anywhere on the classpath).
+have (no H2 anywhere on the classpath). The `gvenzl/oracle-free:23-slim` image is ~1 GB and
+takes ~30s to start the first time, so the first `./mvnw test` run that hits this pattern is
+noticeably slower than the Postgres one it replaced; the container is still reused across all
+tests in the class.
 
 **Every service gets exactly one of these**, one per its main entity's repository: `wallet-service`
 → `WalletRepositoryIntegrationTest`, `fx-rate-service` → `FxRateLockRepositoryIntegrationTest`,
@@ -362,11 +366,16 @@ implementation.md's own gotchas section for the fuller writeup of the first one)
   *different* granular test-starter artifacts (`spring-boot-starter-data-jpa-test` pulls both
   in), not the pre-Boot-4 unified package.
 - Testcontainers 2.x renamed its Maven artifacts with a `testcontainers-` prefix
-  (`org.testcontainers:testcontainers-junit-jupiter`, `org.testcontainers:testcontainers-postgresql`
-  - not the classic bare `junit-jupiter`/`postgresql` artifact ids from 1.x) and moved
-  `PostgreSQLContainer` to `org.testcontainers.postgresql.PostgreSQLContainer`, which is no
-  longer generic (no more `PostgreSQLContainer<SELF>` self-typed builder pattern) - a plain
-  `PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine")`, no `<>`.
+  (`org.testcontainers:testcontainers-junit-jupiter`, `org.testcontainers:testcontainers-oracle-free`
+  - not the classic bare `junit-jupiter`/`oracle-free` artifact ids from 1.x) and puts each
+  container in its own module package - `OracleContainer` is
+  `org.testcontainers.oracle.OracleContainer` (the oracle-free module), *not*
+  `org.testcontainers.containers.OracleContainer` (that's the old 1.x oracle-xe class). It is
+  not generic - a plain `OracleContainer oracle = new OracleContainer("gvenzl/oracle-free:23-slim")`,
+  no `<>`. Spring Boot has a matching `@ServiceConnection` factory for it, same as it did for
+  `PostgreSQLContainer`. (Before the Oracle migration this was
+  `org.testcontainers:testcontainers-postgresql` / `org.testcontainers.postgresql.PostgreSQLContainer`
+  / `new PostgreSQLContainer("postgres:16-alpine")`.)
 
 ## Two mocking traps worth knowing before you hit them
 
@@ -477,18 +486,22 @@ method calls another `@Transactional`-flavored method on `this`), this is the st
 | ledger-service | `LedgerServiceTest` | 4 | Repository mocked, real `DoubleEntryValidator` wired in - balanced posting, `LedgerConflictException` short-circuit, unbalanced posting never reaching `save`, `getStatement` delegation |
 | ledger-service | `LedgerControllerTest` | 7 | Request validation + HTTP/error-code mapping, both endpoints - incl. empty `entries`, `INVALID_LEDGER_ENTRIES`, `LEDGER_CONFLICT`, populated and empty statement |
 | ledger-service | `IdempotencyGuardTest` | 7 | Identical structure to the other services' own - fifth deliberate copy |
-| wallet-service | `WalletRepositoryIntegrationTest` | 3 | Pattern 6 - real Postgres container, Flyway-migrated. `createdAt`/`updatedAt` populated on `save()`'s return, `uk_wallet_user_currency` really enforced, `findById` precision round-trip |
+| wallet-service | `WalletRepositoryIntegrationTest` | 3 | Pattern 6 - real Oracle container (`gvenzl/oracle-free:23-slim`), Flyway-migrated. `createdAt`/`updatedAt` populated on `save()`'s return, `uk_wallet_user_currency` really enforced, `findById` precision round-trip |
 | fx-rate-service | `FxRateLockRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt` populated, `uk_fx_rate_lock_transaction_id` really enforced, `lockedRate` precision round-trip |
 | conversion-orchestrator | `ConversionTransactionRepositoryIntegrationTest` | 3 | Pattern 6 - the direct regression test for the original `Persistable`/merge-vs-persist bug (see above), `uk_conversion_transaction_idempotency_key` really enforced, `sagaState` round-trip |
 | merchant-payment-service | `MerchantPaymentRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt`/`updatedAt` populated, `uk_merchant_payment_transaction_id` really enforced, `status` round-trip |
-| ledger-service | `LedgerEntryRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt` populated, the direct regression test for Bug 3's `VARCHAR(64)` column width (see above), `findByWalletIdOrderByCreatedAtAsc` |
+| ledger-service | `LedgerEntryRepositoryIntegrationTest` | 3 | Pattern 6 - `createdAt` populated, the direct regression test for Bug 3's `VARCHAR2(64)` column width (see above), `findByWalletIdOrderByCreatedAtAsc` |
 
 **234 tests in this table** (236 total per `./mvnw test` across all five modules, including 2
 pre-existing Spring-Initializr smoke tests not written as part of this work - wallet-service and
 fx-rate-service only, the other three modules were hand-scaffolded without one). Run per
 service: `cd backend/<service> && ./mvnw test` - the 5 Pattern 6 integration tests need Docker
-running locally (Testcontainers spins up a real `postgres:16-alpine` container per test class);
-everything else runs with no external dependency at all.
+running locally (Testcontainers spins up a real `gvenzl/oracle-free:23-slim` container per test
+class - ~1 GB image, one-time pull, ~40s start); the two `@SpringBootTest` smoke tests
+additionally need the shared `platform-oracle` compose service already up, with its
+`backend/oracle-init/` script having created the service's user (they have no Testcontainers -
+see [oracle-migration.md](oracle-migration.md) Issue 4); everything else runs with no external
+dependency at all.
 
 ## Checklist for testing the next service
 
@@ -519,7 +532,7 @@ everything else runs with no external dependency at all.
    repository will ever catch this - only a real database will. Applied from the start in
    merchant-payment-service's `MerchantPayment` (same shape, same risk) - confirmed clean on the
    first manual `curl` test, no repeat of the bug.
-9. Add a Pattern 6 repository integration test (real Postgres via Testcontainers) for the
+9. Add a Pattern 6 repository integration test (real Oracle via Testcontainers) for the
    service's main entity/repository — copy an existing one (they're all near-identical) and
    adapt the entity, constructor, and the one real unique/check constraint it covers. Real
    Redis/Kafka Testcontainers integration tests are still a deliberate gap across all five

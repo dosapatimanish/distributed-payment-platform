@@ -7,7 +7,9 @@ against real wallet-service + fx-rate-service (+ later merchant-payment-service)
 ## What this step built
 
 The Conversion Orchestrator, as a standalone Spring Boot 4.1.1 (Java 25) module on port
-`:8083`, backed by its own PostgreSQL database (`saga_db`):
+`:8083`, backed by its own `orchestrator_app` schema in the one shared Oracle Database Free 23ai
+instance (`platform-oracle`, host port `1521`, `paymentdb` PDB; originally PostgreSQL, migrated
+— see [oracle-migration.md](oracle-migration.md)):
 
 - `POST /api/v1/conversions` — start a wallet-to-wallet currency conversion saga, optionally
   followed by a merchant charge.
@@ -74,8 +76,9 @@ way is a clean, well-defined follow-up (see What's next) rather than a rewrite.
 | Crash-recovery / saga resume | If this process dies mid-saga, `conversion_transaction`/`saga_step_log` accurately record where it stopped, but nothing automatically resumes it on restart. Needs the async architecture above — a listener re-entering the flow from persisted state — to do properly. |
 | Automatic retry of a failed compensation step | If reversing a debit/credit or releasing a lock itself fails during compensation, the saga is left stuck one or more states short of `COMPENSATED` rather than retried automatically. Logged at ERROR level - this is the one failure mode that can actually leave money in the wrong place if nobody follows up. |
 | Transactional Outbox | Same category as the other services' deferred Outbox - not built until something needs reliable delivery of *this* service's own events (it doesn't publish any yet). |
-| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `ConversionTransactionRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for the `Persistable` bug below. Real Redis/Kafka Testcontainers still deferred. |
-| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). Also closes Bug 1 below for good - a stale `CHECK` constraint from `ddl-auto=update` growing an enum is exactly the class of problem a real migration tool exists to prevent. |
+| ~~Testcontainers integration tests~~ | **Done** (Oracle, `gvenzl/oracle-free:23-slim`) — `ConversionTransactionRepositoryIntegrationTest`, see testing-guide.md's Pattern 6; the direct regression test for the `Persistable` bug below. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql` (Oracle DDL since the migration), `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section); per-database module is `flyway-database-oracle` now. Also closes Bug 1 below for good - a stale `CHECK` constraint from `ddl-auto=update` growing an enum is exactly the class of problem a real migration tool exists to prevent. |
+| ~~Oracle~~ | **Done** — Postgres → Oracle Database Free 23ai, platform-wide. See [oracle-migration.md](oracle-migration.md), including Issue 2: this service's `saga_step_log.payload` was the column whose Postgres `OID` mapping never matched the `CLOB` the Schema notes always described - the Oracle migration makes the migration file and the prose agree. |
 
 ## Package layout
 
@@ -170,12 +173,13 @@ Recorded in detail because all three are genuinely instructive, not just "fixed 
 INTERNAL_ERROR`, even though the debit and credit had both already succeeded against real
 wallets.
 
-**Root cause**: `saga_state` is mapped `@Enumerated(EnumType.STRING)`. When Hibernate first
-created the `conversion_transaction` table (during the *first* pass, before `PAYMENT_COMPLETED`
-etc. existed), it generated a Postgres `CHECK` constraint listing only the enum values that
-existed at that moment. `ddl-auto=update` adds new columns/tables when the entity changes, but
+**Root cause** (this bug predates both Flyway and the Oracle migration - it happened on
+`ddl-auto=update` against Postgres): `saga_state` is mapped `@Enumerated(EnumType.STRING)`. When
+Hibernate first created the `conversion_transaction` table (during the *first* pass, before
+`PAYMENT_COMPLETED` etc. existed), it generated a `CHECK` constraint listing only the enum
+values that existed at that moment. `ddl-auto=update` adds new columns/tables when the entity changes, but
 it does **not** widen an existing `CHECK` constraint when an enum gains new values - so the
-first time the saga actually tried to persist `saga_state = 'PAYMENT_COMPLETED'`, Postgres
+first time the saga actually tried to persist `saga_state = 'PAYMENT_COMPLETED'`, the DB
 rejected the row outright with `new row ... violates check constraint
 "conversion_transaction_saga_state_check"`.
 
@@ -183,9 +187,11 @@ This is the exact caveat already written into every service's `application.prope
 next to `ddl-auto=update` ("it never safely drops or renames columns") - just a specific
 instance of it nobody had hit yet, because no enum had grown after its table was first created.
 
-**Fix, for local dev**: drop the stale container and volume and let it recreate from scratch
-(`docker compose stop orchestrator-postgres && docker compose rm -f orchestrator-postgres &&
-docker volume rm backend_orchestrator_postgres_data`, then bring it back up) - acceptable
+**Fix, for local dev** (at the time - the service now runs on the shared `platform-oracle`
+instance and Flyway owns the schema): drop the stale container and volume and let it recreate
+from scratch (`docker compose stop orchestrator-postgres && docker compose rm -f
+orchestrator-postgres && docker volume rm backend_orchestrator_postgres_data`, then bring it
+back up) - acceptable
 because this is disposable local dev data, exactly the tradeoff `ddl-auto=update`'s own doc
 comment already names as temporary. A real migration tool (Flyway - see the deferred-items
 table) would express "widen this constraint" as an explicit, reviewable migration step instead
@@ -303,7 +309,7 @@ happy-path and compensation alike — so one instrumentation point covers the wh
 ## Automated tests
 
 68 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
-Testcontainers integration test class against a real Postgres for the persistence layer.
+Testcontainers integration test class against a real Oracle for the persistence layer.
 
 - **`SagaStateMachineTest`** (39 tests) — pure logic, no mocks, no Spring context. Every valid
   transition in the happy path (with and without a merchant charge) and both/all three
@@ -326,19 +332,24 @@ Testcontainers integration test class against a real Postgres for the persistenc
   stub pattern as the other services' controller tests.
 - **`IdempotencyGuardTest`** (7 tests) — identical structure to the other services' own.
 - **`ConversionTransactionRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6:
-  a real `postgres:16-alpine` Testcontainers container, Flyway-migrated. The direct regression
-  test for the original `Persistable`/merge-vs-persist bug (see above) - `save()`'s returned
+  a real `gvenzl/oracle-free:23-slim` Testcontainers container, Flyway-migrated. The direct
+  regression test for the original `Persistable`/merge-vs-persist bug (see above) - `save()`'s returned
   instance has `createdAt`/`updatedAt` populated; also `uk_conversion_transaction_idempotency_key`
   really enforced, `sagaState` round-trip.
 
 ## Schema notes
 
-- `transaction_id` is an app-generated `UUID.randomUUID().toString()`, `VARCHAR(36)` - same
-  portability reasoning as every other entity in this platform.
+- `transaction_id` is an app-generated `UUID.randomUUID().toString()`, `VARCHAR2(36)` - same
+  portability reasoning as every other entity in this platform (and what kept the Oracle
+  migration a dialect change, not a rewrite).
 - `idempotency_key` carries a `UNIQUE` constraint (design doc §6.1.3) - belt-and-braces on top
   of the Redis-based check, same spirit as `Wallet`'s `(user_id, currency)` constraint.
 - `saga_step_log.payload` is a `CLOB`/`@Lob` - holds either a short success summary or the full
-  downstream error description (`HTTP 422 - {...}`), whichever a given step produced.
+  downstream error description (`HTTP 422 - {...}`), whichever a given step produced. On Oracle
+  `@Lob String` maps to `CLOB` (inline character data), which is what this note always
+  described. The *Postgres* `V1__init.sql` had actually created it as `OID` (a large-object
+  reference - Hibernate's Postgres default for `@Lob String`), a latent mismatch the Oracle
+  migration closed - see [oracle-migration.md](oracle-migration.md) Issue 2.
 - No `merchant_id` or `payment_id` column on `conversion_transaction` - not in the design doc's
   schema, and not needed for anything this pass does (no crash-recovery/resume yet to require
   re-deriving them later - see Deliberately deferred). `merchantId` is threaded through as a
@@ -349,7 +360,7 @@ Testcontainers integration test class against a real Postgres for the persistenc
 
 ```bash
 cd backend
-docker compose up -d wallet-postgres fxrate-postgres orchestrator-postgres payment-postgres ledger-postgres redis kafka
+docker compose up -d platform-oracle redis kafka
 cd ../wallet-service && ./mvnw spring-boot:run &            # :8081
 cd ../fx-rate-service && ./mvnw spring-boot:run &            # :8082
 cd ../merchant-payment-service && ./mvnw spring-boot:run &   # :8084
@@ -357,8 +368,10 @@ cd ../ledger-service && ./mvnw spring-boot:run &             # :8085
 cd ../conversion-orchestrator && ./mvnw spring-boot:run      # :8083
 ```
 
-orchestrator-postgres publishes on host port **5436** (5432/5433/5434/5435 already taken
-locally) - see `backend/docker-compose.yml`. If any port is already in use on startup, see
+The one shared `platform-oracle` instance is on host port **1521** (`paymentdb` PDB); all five
+services connect to it, each as its own user (this one as `orchestrator_app`) - see
+`backend/docker-compose.yml` and `backend/oracle-init/`. `gvenzl/oracle-free:23-slim` takes
+~2–4 min to become healthy on first boot (creates the per-service users then). If any port is already in use on startup, see
 wallet-service-implementation.md's note on finding and stopping the specific orphaned PID. If
 you've grown `SagaState` (or any other `@Enumerated(EnumType.STRING)` field) since this
 database was first created, see Bug 1 above before assuming a `500` is something else.
@@ -366,7 +379,7 @@ database was first created, see Bug 1 above before assuming a `500` is something
 ## Verification performed
 
 All done manually via `curl` against real wallet-service, fx-rate-service,
-merchant-payment-service, ledger-service, Postgres, and Redis (automated tests are unit-level
+merchant-payment-service, ledger-service, Oracle, and Redis (automated tests are unit-level
 only, see above):
 
 1. **Happy path, wallet-to-wallet only**: created a USD wallet and an INR wallet for the same
@@ -424,7 +437,7 @@ only, see above):
 - A ledger posting for the merchant-charge "spend" step (see "What's deliberately not captured
   yet" above) - the platform-to-merchant money movement isn't in the ledger yet, only the
   underlying conversion is.
-- ~~Testcontainers integration tests~~ — **Done for Postgres**:
+- ~~Testcontainers integration tests~~ — **Done** (now against Oracle, `gvenzl/oracle-free:23-slim`):
   `ConversionTransactionRepositoryIntegrationTest` (see testing-guide.md Pattern 6)
   regression-tests the *original* `Persistable` bug this codebase learned from. Bug 3 was a
   ledger-service schema bug, so its own regression test lives in ledger-service's

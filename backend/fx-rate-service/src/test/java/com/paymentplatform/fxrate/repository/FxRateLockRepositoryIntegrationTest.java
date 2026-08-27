@@ -10,7 +10,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.dao.DataIntegrityViolationException;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.oracle.OracleContainer;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase.Replace.NONE;
 
 /**
- * Integration test against a real Postgres container - same pattern and reasoning as
+ * Integration test against a real Oracle container - same pattern and reasoning as
  * wallet-service's {@code WalletRepositoryIntegrationTest} (see its javadoc); Flyway's
  * {@code db/migration/V1__init.sql} runs automatically at context startup.
  */
@@ -33,7 +33,7 @@ class FxRateLockRepositoryIntegrationTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static OracleContainer oracle = new OracleContainer("gvenzl/oracle-free:23-slim");
 
     @Autowired
     private FxRateLockRepository lockRepository;

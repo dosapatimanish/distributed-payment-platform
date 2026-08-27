@@ -6,7 +6,9 @@ doc section for it (6.1.2, 6.2.2, 6.3.2), scaffold, verify manually with `curl`.
 ## What this step built
 
 The FX Rate Service, as a standalone Spring Boot 4.1.1 (Java 25) module on port `:8082`, backed
-by its own PostgreSQL database (`fxrate_db`):
+by its own `fxrate_app` schema in the one shared Oracle Database Free 23ai instance
+(`platform-oracle`, host port `1521`, `paymentdb` PDB; originally PostgreSQL, migrated — see
+[oracle-migration.md](oracle-migration.md)):
 
 - `GET /api/v1/fx/rates/{base}/{quote}` — current rate, served from an in-memory cache.
 - `POST /api/v1/fx/rate-lock` — create a short-lived (10s default) locked rate for a transaction.
@@ -26,8 +28,9 @@ by its own PostgreSQL database (`fxrate_db`):
 | Real external FX rate provider | `RateRefreshScheduler` fakes a fluctuating rate instead — no API key/rate-limit/downtime handling to build against yet, and nothing downstream (Conversion Orchestrator) consumes real rates yet either. |
 | Expired-lock sweep | A lock past `expiresAt` is only marked `EXPIRED` lazily, the next time something tries to consume or release it — nothing proactively sweeps `ACTIVE` locks whose TTL has silently passed. Same gap as wallet-service's un-swept expired reservations. |
 | ~~Kafka `rate.locked` / `rate.lock.failed` events~~ | **Done** — see [Kafka Events](#kafka-events) below. |
-| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `FxRateLockRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
-| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section) - `flyway-core` alone doesn't wire Flyway into Spring Boot 4.1.1's startup at all. |
+| ~~Testcontainers integration tests~~ | **Done** (Oracle, `gvenzl/oracle-free:23-slim`) — `FxRateLockRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql` (Oracle DDL since the migration), `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section) - `flyway-core` alone doesn't wire Flyway into Spring Boot 4.1.1's startup at all, and the per-database module must match the DB (`flyway-database-oracle` now). |
+| ~~Oracle~~ | **Done** — Postgres → Oracle Database Free 23ai, platform-wide. See [oracle-migration.md](oracle-migration.md). |
 
 ## Package layout
 
@@ -92,7 +95,7 @@ wrapping `doLockRate`'s mutex-acquisition retry loop + critical section (design 
 ## Automated tests
 
 54 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
-Testcontainers integration test class against a real Postgres for the persistence layer.
+Testcontainers integration test class against a real Oracle for the persistence layer.
 
 - **`FxRateCacheTest`** (3), **`DistributedLockManagerTest`** (5) — pure unit tests, no Spring,
   no mocks; both classes are simple in-memory collections so they're cheap to exercise directly,
@@ -121,20 +124,21 @@ Testcontainers integration test class against a real Postgres for the persistenc
   `WalletEventPublisherTest` (mocked `KafkaTemplate`, real `ObjectMapper`), since the two
   publisher classes are deliberate copies of each other.
 - **`FxRateLockRepositoryIntegrationTest`** (3) — testing-guide.md's Pattern 6: a real
-  `postgres:16-alpine` Testcontainers container, Flyway-migrated. Proves `createdAt` populated on
-  `save()`'s return, `uk_fx_rate_lock_transaction_id` really enforced, `lockedRate` precision
-  round-trip.
+  `gvenzl/oracle-free:23-slim` Testcontainers container, Flyway-migrated. Proves `createdAt`
+  populated on `save()`'s return, `uk_fx_rate_lock_transaction_id` really enforced (`ORA-00001`),
+  `lockedRate` `NUMBER(18,8)` precision round-trip.
 
 ## Local run
 
 ```
-docker compose -f backend/docker-compose.yml up -d fxrate-postgres redis kafka
+docker compose -f backend/docker-compose.yml up -d platform-oracle redis kafka
 cd backend/fx-rate-service && ./mvnw spring-boot:run
 ```
 
-fxrate-postgres publishes on host port **5435** (5432/5433/5434 were already taken locally),
-container port stays 5432 internally — see `backend/docker-compose.yml`. If port 8082 is
-already in use on startup, see wallet-service-implementation.md's "How to run it locally" note
+The shared `platform-oracle` instance is on host port **1521** (`paymentdb` PDB); this service
+connects as `fxrate_app` — see `backend/docker-compose.yml` and `backend/oracle-init/`. The
+`gvenzl/oracle-free:23-slim` image takes ~2–4 min to become healthy on first boot (creates the per-service users then). If port 8082
+is already in use on startup, see wallet-service-implementation.md's "How to run it locally" note
 on finding and stopping the specific orphaned PID rather than killing all java processes.
 
 ## Manually verified (this step)

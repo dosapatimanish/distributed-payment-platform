@@ -1,0 +1,434 @@
+{
+  "info": {
+    "name": "Distributed Payment Platform",
+    "description": "All five microservices in one collection: wallet-service (8081), fx-rate-service (8082), conversion-orchestrator (8083), merchant-payment-service (8084), ledger-service (8085). One folder per service.\n\nEvery non-idempotent write carries an Idempotency-Key header (design doc §6.2.3, backend-documents/idempotency.md): re-sending an unchanged request replays its original response instead of re-running the mutation. GET endpoints and endpoints that are already idempotent at the business layer (fx releaseLock, merchant refund) do not send one.\n\nEach service owns its own Oracle Database Free 23ai instance (see backend/docker-compose.yml). Per-folder base URLs are collection variables (walletBaseUrl, fxBaseUrl, orchestratorBaseUrl, paymentBaseUrl, ledgerBaseUrl); id variables (walletId, reservationId, lockId, paymentId, sourceWalletId, destWalletId, transactionId) are captured by test scripts as you go.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "walletBaseUrl", "value": "http://localhost:8081" },
+    { "key": "fxBaseUrl", "value": "http://localhost:8082" },
+    { "key": "orchestratorBaseUrl", "value": "http://localhost:8083" },
+    { "key": "paymentBaseUrl", "value": "http://localhost:8084" },
+    { "key": "ledgerBaseUrl", "value": "http://localhost:8085" },
+    { "key": "walletId", "value": "" },
+    { "key": "reservationId", "value": "" },
+    { "key": "lockId", "value": "" },
+    { "key": "paymentId", "value": "" },
+    { "key": "sourceWalletId", "value": "" },
+    { "key": "destWalletId", "value": "" },
+    { "key": "transactionId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Wallet Service",
+      "description": "Wallet lifecycle + reservation APIs (wallet-service, port 8081). Every write request carries an Idempotency-Key header; getBalance is read-only.",
+      "item": [
+        {
+          "name": "Create Wallet",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('walletId', body.walletId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-create-wallet-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"user-123\",\n  \"currency\": \"USD\",\n  \"highContention\": false\n}"
+            },
+            "url": { "raw": "{{walletBaseUrl}}/api/v1/wallets", "host": ["{{walletBaseUrl}}"], "path": ["api", "v1", "wallets"] }
+          }
+        },
+        {
+          "name": "Get Balance",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/{{walletId}}/balance",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "{{walletId}}", "balance"]
+            }
+          }
+        },
+        {
+          "name": "Credit Wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-credit-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-002\"\n}"
+            },
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/{{walletId}}/credit",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "{{walletId}}", "credit"]
+            }
+          }
+        },
+        {
+          "name": "Debit Wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-debit-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50.00,\n  \"transactionId\": \"txn-001\"\n}"
+            },
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/{{walletId}}/debit",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "{{walletId}}", "debit"]
+            }
+          }
+        },
+        {
+          "name": "Reserve Funds",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('reservationId', body.reservationId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-reserve-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 25.00,\n  \"transactionId\": \"txn-003\"\n}"
+            },
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/{{walletId}}/reserve",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "{{walletId}}", "reserve"]
+            }
+          }
+        },
+        {
+          "name": "Capture Reservation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Idempotency-Key", "value": "postman-capture-1" }
+            ],
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/reservations/{{reservationId}}/capture",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "reservations", "{{reservationId}}", "capture"]
+            }
+          }
+        },
+        {
+          "name": "Release Reservation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Idempotency-Key", "value": "postman-release-1" }
+            ],
+            "url": {
+              "raw": "{{walletBaseUrl}}/api/v1/wallets/reservations/{{reservationId}}/release",
+              "host": ["{{walletBaseUrl}}"],
+              "path": ["api", "v1", "wallets", "reservations", "{{reservationId}}", "release"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "FX Rate Service",
+      "description": "Rate quoting + rate-lock APIs (fx-rate-service, port 8082). lockRate and consumeLock require an Idempotency-Key header; getCurrentRate is read-only and releaseLock is already idempotent by design (design doc §6.4).",
+      "item": [
+        {
+          "name": "Get Current Rate",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{fxBaseUrl}}/api/v1/fx/rates/USD/INR",
+              "host": ["{{fxBaseUrl}}"],
+              "path": ["api", "v1", "fx", "rates", "USD", "INR"]
+            }
+          }
+        },
+        {
+          "name": "Lock Rate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('lockId', body.lockId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-lock-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"baseCurrency\": \"USD\",\n  \"quoteCurrency\": \"INR\",\n  \"amount\": 100.00,\n  \"transactionId\": \"txn-fx-001\"\n}"
+            },
+            "url": { "raw": "{{fxBaseUrl}}/api/v1/fx/rate-lock", "host": ["{{fxBaseUrl}}"], "path": ["api", "v1", "fx", "rate-lock"] }
+          }
+        },
+        {
+          "name": "Consume Lock",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Idempotency-Key", "value": "postman-consume-1" }
+            ],
+            "url": {
+              "raw": "{{fxBaseUrl}}/api/v1/fx/rate-lock/{{lockId}}/consume",
+              "host": ["{{fxBaseUrl}}"],
+              "path": ["api", "v1", "fx", "rate-lock", "{{lockId}}", "consume"]
+            }
+          }
+        },
+        {
+          "name": "Release Lock",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{fxBaseUrl}}/api/v1/fx/rate-lock/{{lockId}}",
+              "host": ["{{fxBaseUrl}}"],
+              "path": ["api", "v1", "fx", "rate-lock", "{{lockId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Merchant Payment Service",
+      "description": "Mock-acquirer charge/refund APIs (merchant-payment-service, port 8084). pay requires an Idempotency-Key header; refund is already idempotent by design. Use merchantId 'acct-decline' (configurable via merchantpayment.acquirer.decline-merchant-id) to trigger a deterministic decline.",
+      "item": [
+        {
+          "name": "Pay (Approved)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('paymentId', body.paymentId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-pay-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transactionId\": \"txn-pay-1\",\n  \"merchantId\": \"merchant-abc\",\n  \"amount\": 75.00,\n  \"currency\": \"USD\"\n}"
+            },
+            "url": { "raw": "{{paymentBaseUrl}}/api/v1/merchant-payments", "host": ["{{paymentBaseUrl}}"], "path": ["api", "v1", "merchant-payments"] }
+          }
+        },
+        {
+          "name": "Pay (Declined)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-pay-2" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transactionId\": \"txn-pay-2\",\n  \"merchantId\": \"acct-decline\",\n  \"amount\": 30.00,\n  \"currency\": \"USD\"\n}"
+            },
+            "url": { "raw": "{{paymentBaseUrl}}/api/v1/merchant-payments", "host": ["{{paymentBaseUrl}}"], "path": ["api", "v1", "merchant-payments"] }
+          }
+        },
+        {
+          "name": "Get Payment Status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{paymentBaseUrl}}/api/v1/merchant-payments/{{paymentId}}",
+              "host": ["{{paymentBaseUrl}}"],
+              "path": ["api", "v1", "merchant-payments", "{{paymentId}}"]
+            }
+          }
+        },
+        {
+          "name": "Refund",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{paymentBaseUrl}}/api/v1/merchant-payments/{{paymentId}}/refund",
+              "host": ["{{paymentBaseUrl}}"],
+              "path": ["api", "v1", "merchant-payments", "{{paymentId}}", "refund"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ledger Service",
+      "description": "Double-entry ledger APIs (ledger-service, port 8085). postEntries requires an Idempotency-Key header; getStatement is read-only.",
+      "item": [
+        {
+          "name": "Post Entries (Balanced)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-ledger-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transactionId\": \"txn-postman-1\",\n  \"entries\": [\n    { \"walletId\": \"wallet-A\", \"entryType\": \"DEBIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 400.00 },\n    { \"walletId\": \"wallet-B\", \"entryType\": \"CREDIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 600.00 }\n  ]\n}"
+            },
+            "url": { "raw": "{{ledgerBaseUrl}}/api/v1/ledger/entries", "host": ["{{ledgerBaseUrl}}"], "path": ["api", "v1", "ledger", "entries"] }
+          }
+        },
+        {
+          "name": "Post Entries (Unbalanced - triggers INVALID_LEDGER_ENTRIES)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-ledger-2" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transactionId\": \"txn-postman-2\",\n  \"entries\": [\n    { \"walletId\": \"wallet-A\", \"entryType\": \"DEBIT\", \"amount\": 100.00, \"currency\": \"USD\", \"balanceAfter\": 300.00 },\n    { \"walletId\": \"wallet-B\", \"entryType\": \"CREDIT\", \"amount\": 90.00, \"currency\": \"USD\", \"balanceAfter\": 690.00 }\n  ]\n}"
+            },
+            "url": { "raw": "{{ledgerBaseUrl}}/api/v1/ledger/entries", "host": ["{{ledgerBaseUrl}}"], "path": ["api", "v1", "ledger", "entries"] }
+          }
+        },
+        {
+          "name": "Get Statement",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ledgerBaseUrl}}/api/v1/ledger/wallets/wallet-A/statement",
+              "host": ["{{ledgerBaseUrl}}"],
+              "path": ["api", "v1", "ledger", "wallets", "wallet-A", "statement"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Conversion Orchestrator",
+      "description": "Wallet-to-wallet conversion SAGA endpoints (conversion-orchestrator, port 8083), optionally followed by a merchant charge. startConversion requires an Idempotency-Key header; a retry replays the whole saga's already-computed result. Requires wallet-service (8081) and fx-rate-service (8082) running with real wallets already created/funded (see the Wallet Service folder) and merchant-payment-service (8084) up for the merchant-charge requests.",
+      "item": [
+        {
+          "name": "Start Conversion (no merchant)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('transactionId', body.transactionId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-conversion-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 100.00\n}"
+            },
+            "url": { "raw": "{{orchestratorBaseUrl}}/api/v1/conversions", "host": ["{{orchestratorBaseUrl}}"], "path": ["api", "v1", "conversions"] }
+          }
+        },
+        {
+          "name": "Start Conversion + Pay Merchant (Approved)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-conversion-pay-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 50.00,\n  \"merchantId\": \"merchant-abc\"\n}"
+            },
+            "url": { "raw": "{{orchestratorBaseUrl}}/api/v1/conversions", "host": ["{{orchestratorBaseUrl}}"], "path": ["api", "v1", "conversions"] }
+          }
+        },
+        {
+          "name": "Start Conversion + Pay Merchant (Declined)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-conversion-pay-decline-1" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"user-123\",\n  \"sourceWalletId\": \"{{sourceWalletId}}\",\n  \"destWalletId\": \"{{destWalletId}}\",\n  \"sourceCurrency\": \"USD\",\n  \"destCurrency\": \"INR\",\n  \"sourceAmount\": 30.00,\n  \"merchantId\": \"acct-decline\"\n}"
+            },
+            "url": { "raw": "{{orchestratorBaseUrl}}/api/v1/conversions", "host": ["{{orchestratorBaseUrl}}"], "path": ["api", "v1", "conversions"] }
+          }
+        },
+        {
+          "name": "Get Conversion Status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{orchestratorBaseUrl}}/api/v1/conversions/{{transactionId}}",
+              "host": ["{{orchestratorBaseUrl}}"],
+              "path": ["api", "v1", "conversions", "{{transactionId}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

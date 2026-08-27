@@ -10,7 +10,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.dao.DataIntegrityViolationException;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.oracle.OracleContainer;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase.Replace.NONE;
 
 /**
- * Integration test against a real Postgres container - no mocks, real JDBC round-trip. Unlike
+ * Integration test against a real Oracle container - no mocks, real JDBC round-trip. Unlike
  * {@code WalletServiceTest} (which mocks {@link WalletRepository} entirely), this exercises the
  * actual schema: Flyway's {@code db/migration/V1__init.sql} runs automatically at context
  * startup (same as production - see {@code application.properties}'s {@code ddl-auto=validate}
@@ -37,11 +37,11 @@ import static org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTest
 @Testcontainers
 class WalletRepositoryIntegrationTest {
 
-    // Testcontainers 2.x's PostgreSQLContainer is no longer generic (the old self-typed
-    // PostgreSQLContainer<SELF> builder pattern was dropped) - plain, unparameterized type.
+    // Testcontainers 2.x's OracleContainer is not generic (no self-typed <SELF> builder) - plain,
+    // unparameterized type. gvenzl/oracle-free:23-slim matches the runtime DB (docker-compose.yml).
     @Container
     @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static OracleContainer oracle = new OracleContainer("gvenzl/oracle-free:23-slim");
 
     @Autowired
     private WalletRepository walletRepository;

@@ -7,7 +7,9 @@ wire them together - not yet called by conversion-orchestrator (see What's next)
 ## What this step built
 
 The Merchant Payment Service, as a standalone Spring Boot 4.1.1 (Java 25) module on port
-`:8084`, backed by its own PostgreSQL database (`payment_db`):
+`:8084`, backed by its own `payment_app` schema in the one shared Oracle Database Free 23ai
+instance (`platform-oracle`, host port `1521`, `paymentdb` PDB; originally PostgreSQL, migrated
+— see [oracle-migration.md](oracle-migration.md)):
 
 - `POST /api/v1/merchant-payments` — charge a merchant via a mock acquirer.
 - `POST /api/v1/merchant-payments/{paymentId}/refund` — compensating refund.
@@ -30,8 +32,9 @@ The Merchant Payment Service, as a standalone Spring Boot 4.1.1 (Java 25) module
 | Resilience4j circuit breaker | Design doc §6.3.4 calls for one wrapping `AcquirerGatewayClient`. Wrapping a mock in a circuit breaker would be pure decoration - there is no real external dependency yet to actually protect against. Revisit once a real acquirer exists. |
 | Configurable refund failure | The mock's `refund()` always succeeds - only the primary charge needed a deterministic failure hook to exercise `payment.failed` and (eventually) the orchestrator's compensation path; a failing refund is a rarer edge case, not built yet. |
 | Transactional Outbox | Same category as the other three services' deferred Outbox. |
-| ~~Testcontainers integration tests~~ | **Done** (Postgres only) — `MerchantPaymentRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
-| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql`, `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section). |
+| ~~Testcontainers integration tests~~ | **Done** (Oracle, `gvenzl/oracle-free:23-slim`) — `MerchantPaymentRepositoryIntegrationTest`, see testing-guide.md's Pattern 6. Real Redis/Kafka Testcontainers still deferred. |
+| ~~Flyway/Liquibase~~ | **Done** — `db/migration/V1__init.sql` (Oracle DDL since the migration), `ddl-auto=validate`. Same `spring-boot-starter-flyway` gotcha as wallet-service (see its implementation notes' gotchas section); per-database module is `flyway-database-oracle` now. |
+| ~~Oracle~~ | **Done** — Postgres → Oracle Database Free 23ai, platform-wide. See [oracle-migration.md](oracle-migration.md). |
 
 ## Package layout
 
@@ -99,7 +102,7 @@ first try.
 ## Automated tests
 
 30 tests total, all passing (`./mvnw test`) — unit tests (Mockito) for business logic, plus one
-Testcontainers integration test class against a real Postgres for the persistence layer.
+Testcontainers integration test class against a real Oracle for the persistence layer.
 
 - **`MerchantPaymentServiceTest`** (9 tests) — `MerchantPaymentRepository`,
   `AcquirerGatewayClient`, and `MerchantPaymentEventPublisher` all mocked. Covers both charge
@@ -116,9 +119,9 @@ Testcontainers integration test class against a real Postgres for the persistenc
 - **`MerchantPaymentEventPublisherTest`** (3 tests) — identical structure to the other services'
   own event-publisher tests (Pattern 5 in testing-guide.md).
 - **`MerchantPaymentRepositoryIntegrationTest`** (3 tests) — testing-guide.md's Pattern 6: a real
-  `postgres:16-alpine` Testcontainers container, Flyway-migrated. Proves `createdAt`/`updatedAt`
-  populated on `save()`'s return, `uk_merchant_payment_transaction_id` really enforced, `status`
-  round-trip.
+  `gvenzl/oracle-free:23-slim` Testcontainers container, Flyway-migrated. Proves
+  `createdAt`/`updatedAt` populated on `save()`'s return, `uk_merchant_payment_transaction_id`
+  really enforced (`ORA-00001`), `status` round-trip.
 
 ## Schema notes
 
@@ -133,16 +136,17 @@ Testcontainers integration test class against a real Postgres for the persistenc
 
 ```bash
 cd backend
-docker compose up -d payment-postgres redis kafka
+docker compose up -d platform-oracle redis kafka
 cd merchant-payment-service && ./mvnw spring-boot:run   # :8084
 ```
 
-payment-postgres publishes on host port **5437** (5432/5433/5434/5435/5436 already taken
-locally) - see `backend/docker-compose.yml`.
+The shared `platform-oracle` instance is on host port **1521** (`paymentdb` PDB); this service
+connects as `payment_app` - see `backend/docker-compose.yml` and `backend/oracle-init/`.
+`gvenzl/oracle-free:23-slim` takes ~2–4 min to become healthy on first boot (creates the per-service users then).
 
 ## Verification performed
 
-All done manually via `curl` against real Postgres, Redis, and Kafka:
+All done manually via `curl` against real Oracle, Redis, and Kafka:
 
 1. **Approved charge**: `POST /merchant-payments` for a normal merchant id → `201`,
    `status: COMPLETED`, `acquirerRef` populated, `createdAt`/`updatedAt` correctly populated on
@@ -184,4 +188,4 @@ All done manually via `curl` against real Postgres, Redis, and Kafka:
   (conversion-orchestrator's compensation path), so a deterministic refund-failure hook (same
   idea as `charge`'s decline-merchant-id) is a natural next addition to actually exercise that
   path, rather than a hypothetical one.
-- ~~Testcontainers integration tests~~ — **Done** (Postgres only, see Deferred table above).
+- ~~Testcontainers integration tests~~ — **Done** (Oracle, see Deferred table above).

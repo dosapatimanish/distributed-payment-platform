@@ -5,3 +5,8 @@
 *.sh text eol=lf
 mvnw text eol=lf
 mvnw.cmd text eol=crlf
+
+# SQL is read by tools running inside Linux containers too - Flyway migrations and the
+# backend/oracle-init/ user-creation script mounted into the gvenzl/oracle-free container.
+# Keep LF so a CRLF checkout on Windows can't trip sqlplus / Flyway parsing.
+*.sql text eol=lf
