@@ -1,0 +1,58 @@
+/* Design tokens. Raw palette on :root (light) + [data-theme="dark"];
+   semantic vars reference the palette so they follow the runtime theme.
+   @theme inline maps semantic vars to Tailwind color utilities. */
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root {
+  --paper: #f5f1e6;
+  --paper-2: #ece6d6;
+  --ink: #14361f;
+  --ink-soft: #3b5d43;
+  --green: #1b7a3d;
+  --green-bright: #85bb65;
+  --green-deep: #0e3b1e;
+  --gold: #a9852f;
+  --gold-soft: #c9a85c;
+  --line: rgba(20, 54, 31, 0.14);
+
+  /* semantic */
+  --bg: var(--paper);
+  --surface: var(--paper-2);
+  --text: var(--ink);
+  --text-muted: var(--ink-soft);
+  --accent: var(--green);
+  --accent-bright: var(--green-bright);
+  --border: var(--line);
+  --focus: var(--gold);
+}
+
+[data-theme='dark'] {
+  --paper: #0b0f0c;
+  --paper-2: #121a14;
+  --ink: #e7efe4;
+  --ink-soft: #9db6a2;
+  --green: #3ea55e;
+  --green-bright: #8fd07a;
+  --green-deep: #062a14;
+  --gold: #c9a85c;
+  --gold-soft: #e6ce93;
+  --line: rgba(143, 208, 122, 0.14);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-bright: var(--accent-bright);
+  --color-line: var(--border);
+  --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
+  --color-green-deep: var(--green-deep);
+
+  --font-display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+}
